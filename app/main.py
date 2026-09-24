@@ -25,6 +25,7 @@ from .training import (
     TrainingManager,
     TrainingSettings,
     Workspace,
+    catalog_groups,
     find_train_python,
     load_checkpoint_catalog,
     suggest_checkpoint,
@@ -82,7 +83,9 @@ def default_settings(voice: Voice, workspace: Workspace) -> Dict[str, Any]:
     if workspace.latest_checkpoint() is not None:
         settings.checkpoint = LATEST_CHECKPOINT
     else:
-        suggested = suggest_checkpoint(CATALOG, voice.espeak_voice, voice.gender)
+        suggested = suggest_checkpoint(
+            CATALOG, voice.language, voice.espeak_voice, voice.gender
+        )
         settings.checkpoint = suggested.url if suggested else ""
 
     return asdict(settings)
@@ -96,6 +99,7 @@ def voice_json(voice: Voice) -> Dict[str, Any]:
         "recorded": voice.num_recorded(),
         "prompts": len(PROMPTS.get(voice.language, [])),
         "modelName": voice.model_stem,
+        "checkpointGroups": catalog_groups(voice.language, voice.espeak_voice),
         "defaults": default_settings(voice, workspace),
         "training": workspace.status(),
     }
@@ -176,6 +180,7 @@ async def api_record(
     id: str = Form(...),
     text: str = Form(...),
     audio: UploadFile = File(...),
+    mic: str = Form(""),
 ) -> Dict[str, Any]:
     voice = store.get(name)
     content_type = (audio.content_type or "").lower()
@@ -190,7 +195,8 @@ async def api_record(
         raise ValueError("Recording is empty")
 
     voice.save_recording(group, id, text, data, extension)
-    return {"recorded": voice.num_recorded()}
+    voice.remember_microphone(mic)
+    return {"recorded": voice.num_recorded(), "microphone": voice.microphone}
 
 
 @app.post("/api/voices/{name}/upload")

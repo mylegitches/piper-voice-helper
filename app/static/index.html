@@ -63,11 +63,18 @@
         <p class="hint"><strong id="recorded-count">0</strong> recordings · <span id="readiness-text"></span></p>
       </div>
 
+      <div class="row mic-row">
+        <label class="grow">Microphone
+          <select id="mic-select"><option value="">Click “Enable microphone” to list your microphones</option></select>
+        </label>
+        <button id="mic-test-btn" class="btn btn--secondary">🎤 Enable microphone</button>
+      </div>
+      <div class="vu"><div id="vu-bar"></div></div>
+      <div id="mic-warning" class="banner banner--warning hidden"></div>
+
       <div id="prompt-box" class="prompt-box">
         <p id="prompt-text" class="prompt-text">Loading…</p>
       </div>
-
-      <div class="vu"><div id="vu-bar"></div></div>
 
       <div class="row controls">
         <button id="record-btn" class="btn btn--record">● Record <kbd>R</kbd></button>
@@ -75,10 +82,7 @@
         <button id="save-btn" class="btn btn--primary" disabled>✓ Save &amp; next <kbd>S</kbd></button>
         <button id="skip-btn" class="btn btn--ghost">Skip <kbd>K</kbd></button>
       </div>
-      <div class="row">
-        <select id="mic-select" class="grow"><option value="">Default microphone</option></select>
-      </div>
-      <p id="record-status" class="hint">Read each sentence naturally in a quiet room. Press Record, read, press Record again to stop.</p>
+      <p id="record-status" class="hint">First pick your microphone and click “Enable microphone”. Use the same one every session.</p>
       <audio id="playback" class="hidden"></audio>
 
       <details class="upload">

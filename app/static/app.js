@@ -82,9 +82,15 @@ async function selectVoice(name) {
 
   skip = 0;
   $('#record-btn').innerHTML = '● Record <kbd>R</kbd>';
-  $('#record-status').textContent = 'Read each sentence naturally in a quiet room. Press R to record, R again to stop.';
+  $('#record-status').textContent = mediaStream
+    ? 'Read each sentence naturally in a quiet room. Press R to record, R again to stop.'
+    : 'First pick your microphone and click “Enable microphone”. Use the same one every session.';
   updateRecorded(voice.recorded);
   await loadPrompt();
+  if (micAvailable()) {
+    await listMicrophones();
+    checkMicMatch();
+  }
   fillTrainForm(voice.defaults);
   logCount = 0;
   $('#log-panel').textContent = '';
@@ -156,7 +162,7 @@ async function loadPrompt() {
       ? 'No more sentences after the skipped ones. Reload to see them again.'
       : 'All sentences recorded — nice work!';
   }
-  $('#record-btn').disabled = !prompt;
+  updateRecordButton();
   $('#skip-btn').disabled = !prompt;
 }
 
@@ -167,17 +173,47 @@ function resetTake() {
   $('#prompt-box').classList.remove('recording', 'recorded');
 }
 
+let micLabel = '';          // label of the microphone currently open
+
+function micAvailable() {
+  return window.isSecureContext && !!navigator.mediaDevices;
+}
+
+function updateRecordButton() {
+  $('#record-btn').disabled = !prompt || !mediaStream;
+  $('#record-btn').title = mediaStream ? '' : 'Enable your microphone first';
+}
+
 async function listMicrophones() {
+  const select = $('#mic-select');
   try {
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const select = $('#mic-select');
+    const devices = (await navigator.mediaDevices.enumerateDevices())
+      .filter((d) => d.kind === 'audioinput');
+    const named = devices.filter((d) => d.deviceId && d.label);
+    if (named.length === 0) {
+      // Browsers hide device names until the microphone is allowed once
+      select.innerHTML = '<option value="">Click “Enable microphone” to list your microphones</option>';
+      select.disabled = true;
+      return;
+    }
+
     const current = select.value;
-    select.innerHTML = '<option value="">Default microphone</option>';
-    devices.filter((d) => d.kind === 'audioinput' && d.deviceId).forEach((d, i) => {
-      select.add(new Option(d.label || `Microphone ${i + 1}`, d.deviceId));
-    });
-    select.value = current;
-  } catch (e) { /* no devices API */ }
+    select.innerHTML = '';
+    named.forEach((d) => select.add(new Option(d.label, d.deviceId)));
+    select.disabled = false;
+
+    let wanted = current;
+    if (!wanted) {
+      try { wanted = localStorage.getItem('mic') || ''; } catch (e) { wanted = ''; }
+    }
+    const voiceMic = voice && voice.microphone && named.find((d) => d.label === voice.microphone);
+    if (voiceMic && !mediaStream) {
+      wanted = voiceMic.deviceId;  // default to what this voice was recorded with
+    }
+    select.value = named.some((d) => d.deviceId === wanted) ? wanted : named[0].deviceId;
+  } catch (e) {
+    select.innerHTML = '<option value="">No microphones found</option>';
+  }
 }
 
 async function openMicrophone() {
@@ -195,6 +231,7 @@ async function openMicrophone() {
       channelCount: 1,
     },
   });
+  micLabel = mediaStream.getAudioTracks()[0].label || '';
   const context = new AudioContext();
   analyser = context.createAnalyser();
   analyser.fftSize = 1024;
@@ -214,15 +251,61 @@ async function openMicrophone() {
     requestAnimationFrame(tick);
   };
   tick();
-  listMicrophones();
+  await listMicrophones();
+  // Show the device actually opened
+  const opened = Array.from($('#mic-select').options).find((o) => o.text === micLabel);
+  if (opened) {
+    $('#mic-select').value = opened.value;
+  }
+  $('#mic-test-btn').textContent = '🎤 Microphone on';
+  updateRecordButton();
+  checkMicMatch();
   return mediaStream;
 }
 
-$('#mic-select').addEventListener('change', () => {
+function closeMicrophone() {
   if (mediaStream) {
     mediaStream.getTracks().forEach((t) => t.stop());
     mediaStream = null;
     analyser = null;
+    micLabel = '';
+    $('#vu-bar').style.width = '0';
+    $('#mic-test-btn').textContent = '🎤 Enable microphone';
+  }
+  updateRecordButton();
+}
+
+async function enableMicrophone() {
+  try {
+    await openMicrophone();
+    $('#record-status').textContent = 'Microphone on. Say something and watch the green bar (red means too loud), then press R to record.';
+  } catch (err) {
+    showMicProblem(`Microphone not available: ${err.message}`);
+  }
+}
+
+function showMicProblem(text) {
+  $('#mic-warning').textContent = text;
+  show($('#mic-warning'), !!text);
+}
+
+function checkMicMatch() {
+  if (voice && voice.microphone && micLabel && micLabel !== voice.microphone) {
+    showMicProblem(`This voice was recorded with “${voice.microphone}”, but “${micLabel}” is selected. `
+      + 'Switch back so every clip sounds the same.');
+  } else {
+    showMicProblem('');
+  }
+}
+
+$('#mic-select').addEventListener('change', () => {
+  closeMicrophone();
+  try { localStorage.setItem('mic', $('#mic-select').value); } catch (e) { /* ignore */ }
+  enableMicrophone();
+});
+$('#mic-test-btn').addEventListener('click', () => {
+  if (!mediaStream) {
+    enableMicrophone();
   }
 });
 
@@ -242,10 +325,8 @@ async function toggleRecording() {
     return;
   }
 
-  try {
-    await openMicrophone();
-  } catch (err) {
-    $('#record-status').textContent = `Microphone not available: ${err.message}`;
+  if (!mediaStream) {
+    $('#record-status').textContent = 'Pick your microphone and click “Enable microphone” first.';
     return;
   }
 
@@ -281,10 +362,13 @@ async function saveRecording() {
   form.set('id', prompt.id);
   form.set('text', prompt.text);
   form.set('audio', recordedBlob, 'audio');
+  form.set('mic', micLabel);
   $('#save-btn').disabled = true;
   try {
     const result = await api(voiceUrl('/recordings'), { method: 'POST', body: form });
     updateRecorded(result.recorded);
+    voice.microphone = result.microphone;
+    checkMicMatch();
     $('#record-btn').innerHTML = '● Record <kbd>R</kbd>';
     $('#record-status').textContent = 'Saved. Next sentence:';
     await loadPrompt();
@@ -379,7 +463,7 @@ function fillCheckpoints(defaults) {
     select.add(new Option("Continue this voice's training", 'latest'));
   }
   const groups = Object.entries(info.checkpoints).sort(([a], [b]) => {
-    const rank = (g) => (g === voice.espeak_voice || g === voice.espeak_voice.split('-')[0] ? 0 : g === 'generic' ? 1 : 2);
+    const rank = (g) => (voice.checkpointGroups.includes(g) ? 0 : g === 'generic' ? 1 : 2);
     return rank(a) - rank(b) || a.localeCompare(b);
   });
   groups.forEach(([group, entries]) => {
@@ -652,10 +736,27 @@ async function main() {
     show(banner, true);
   }
 
+  if (!micAvailable()) {
+    showMicProblem('Browsers only allow the microphone on http://localhost or HTTPS. '
+      + 'Open this page through an SSH tunnel (ssh -L 8000:localhost:8000 you@server, then '
+      + 'http://localhost:8000), or upload recordings as a zip below.');
+    $('#mic-test-btn').disabled = true;
+    $('#mic-select').disabled = true;
+  } else {
+    listMicrophones();
+  }
+
   await loadVoices();
 }
 
 main().catch((err) => {
   document.body.insertAdjacentHTML('afterbegin', '<div class="banner banner--error"></div>');
   document.querySelector('.banner--error').textContent = `Failed to load: ${err.message}`;
+});
+
+// Opening the log jumps to the newest lines
+document.querySelector('.log-details').addEventListener('toggle', (e) => {
+  if (e.target.open) {
+    $('#log-panel').scrollTop = $('#log-panel').scrollHeight;
+  }
 });

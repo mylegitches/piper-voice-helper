@@ -218,3 +218,5 @@ input[type=file] { padding: 0.45rem; }
 #speak-audio { width: 100%; }
 .howto { padding-left: 1.3rem; font-size: 0.9rem; color: var(--muted); display: flex; flex-direction: column; gap: 0.3rem; }
 .howto strong { color: var(--text); }
+.mic-row label { flex-direction: column; }
+.mic-row .btn { align-self: flex-end; }

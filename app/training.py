@@ -147,16 +147,25 @@ def load_checkpoint_catalog(
     return catalog
 
 
+def catalog_groups(language: str, espeak_voice: str) -> List[str]:
+    """Checkpoint list names that match a voice, best first."""
+    candidates = [language.lower(), espeak_voice, espeak_voice.split("-")[0]]
+    return list(dict.fromkeys(candidates))
+
+
 def suggest_checkpoint(
-    catalog: Dict[str, List[PretrainedCheckpoint]], espeak_voice: str, gender: str
+    catalog: Dict[str, List[PretrainedCheckpoint]],
+    language: str,
+    espeak_voice: str,
+    gender: str,
 ) -> Optional[PretrainedCheckpoint]:
     """Best starting checkpoint for a language and voice type."""
-    entries = (
-        catalog.get(espeak_voice)
-        or catalog.get(espeak_voice.split("-")[0])
-        or catalog.get("generic")
-        or []
-    )
+    entries: List[PretrainedCheckpoint] = []
+    for group in catalog_groups(language, espeak_voice) + ["generic"]:
+        entries = catalog.get(group, [])
+        if entries:
+            break
+
     if not entries:
         return None
 

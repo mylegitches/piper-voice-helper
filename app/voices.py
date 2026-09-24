@@ -14,7 +14,7 @@ import re
 import shutil
 import time
 import zipfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -26,10 +26,11 @@ VOICE_NAME = re.compile(r"^[a-z0-9_]{1,40}$")
 _ESPEAK_VOICES = {
     "en-us": "en-us",
     "en-ca": "en-us",
-    "en-gb": "en-gb",
-    "en-au": "en-gb",
-    "en-ie": "en-gb",
-    "en-in": "en-gb",
+    # espeak-ng's "en" is British English ("en-gb" isn't a voice name)
+    "en-gb": "en",
+    "en-au": "en",
+    "en-ie": "en",
+    "en-in": "en",
     "pt-br": "pt-br",
     "pt-pt": "pt",
     "es-mx": "es-419",
@@ -63,6 +64,9 @@ def load_prompts(prompts_dir: Path) -> Tuple[Dict[str, str], Dict[str, List[Prom
             continue
 
         name, code = language_dir.name.rsplit("_", maxsplit=1)
+        if code == "test":
+            continue
+
         languages[code] = name
         language_prompts = prompts.setdefault(code, [])
         for prompt_path in sorted(language_dir.glob("*.txt")):
@@ -88,6 +92,9 @@ class Voice:
     language: str
     espeak_voice: str
     gender: str = "female"
+    microphone: str = ""
+    """Microphone the first recording was made with (keeps clips consistent)."""
+
     created: float = field(default_factory=time.time)
     root: Path = field(default=Path(), repr=False)
 
@@ -104,6 +111,17 @@ class Voice:
         data = asdict(self)
         data.pop("root")
         return data
+
+    def save_meta(self) -> None:
+        (self.root / "voice.json").write_text(
+            json.dumps(self.to_json(), indent=2), encoding="utf-8"
+        )
+
+    def remember_microphone(self, label: str) -> None:
+        label = label.strip()[:200]
+        if label and not self.microphone:
+            self.microphone = label
+            self.save_meta()
 
     def num_recorded(self) -> int:
         if not self.recordings_dir.is_dir():
@@ -256,9 +274,7 @@ class VoiceStore:
             root=root,
         )
         root.mkdir(parents=True)
-        (root / "voice.json").write_text(
-            json.dumps(voice.to_json(), indent=2), encoding="utf-8"
-        )
+        voice.save_meta()
         return voice
 
     def delete(self, voice: Voice) -> None:
@@ -270,4 +286,5 @@ class VoiceStore:
             return None
 
         data = json.loads(meta_path.read_text(encoding="utf-8"))
-        return Voice(root=root, **data)
+        known = {f.name for f in fields(Voice)} - {"root"}
+        return Voice(root=root, **{k: v for k, v in data.items() if k in known})
