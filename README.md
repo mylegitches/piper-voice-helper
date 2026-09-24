@@ -16,7 +16,7 @@ cd piper-voice-helper
 docker compose up --build
 ```
 
-Open **http://localhost:8000**.
+Open **http://localhost:8576**.
 
 No GPU? `docker compose -f docker-compose.cpu.yml up --build` (recording and testing are fine, training is very slow).
 
@@ -51,7 +51,7 @@ Needs Python 3.10+, `git`, `ffmpeg`, `build-essential`, `cmake` and `ninja-build
 
 ```bash
 script/setup   # creates .venv with the app and piper1-gpl training
-script/run     # http://localhost:8000
+script/run     # http://localhost:8576
 ```
 
 ## How it works

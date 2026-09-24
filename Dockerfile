@@ -24,6 +24,6 @@ COPY prompts/ ./prompts/
 ENV PYTHONUNBUFFERED=1 \
     DATA_DIR=/data
 VOLUME ["/data"]
-EXPOSE 8000
+EXPOSE 8576
 
-CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["python3", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8576"]

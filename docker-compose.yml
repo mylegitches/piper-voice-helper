@@ -4,7 +4,7 @@ services:
   piper-voice-helper:
     build: .
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8576:8576"
     volumes:
       - ./data:/data
     shm_size: 4gb  # PyTorch data loaders need more than Docker's 64 MB default
