@@ -1,0 +1,18 @@
+# NVIDIA GPU (recommended). Needs the NVIDIA Container Toolkit.
+# No GPU? Use: docker compose -f docker-compose.cpu.yml up --build
+services:
+  piper-voice-helper:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/data
+    shm_size: 4gb  # PyTorch data loaders need more than Docker's 64 MB default
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

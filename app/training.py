@@ -1,9 +1,10 @@
 """Background Piper voice training with piper1-gpl.
 
 Workflow borrowed from TextyMcSpeechy: fine-tune from a pretrained checkpoint,
-keep training until stopped (or an epoch limit), and export + listen to the
-latest checkpoint at any time.
+train for a while (or until stopped), and export + listen to the latest
+checkpoint at any time. Finished voices work with Home Assistant's Piper.
 """
+
 import asyncio
 import json
 import logging
@@ -12,12 +13,15 @@ import re
 import shutil
 import signal
 import sys
+import time
 import urllib.parse
 import urllib.request
 from collections import deque
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Deque, Dict, List, Optional
+
+from .voices import AUDIO_EXTENSIONS, Voice
 
 _LOGGER = logging.getLogger(__name__)
 _DIR = Path(__file__).parent
@@ -27,22 +31,13 @@ ACCELERATORS = ("auto", "gpu", "cpu")
 LATEST_CHECKPOINT = "latest"
 """Special checkpoint value: continue from this voice's newest checkpoint."""
 
-# Prompt language code (lower case) -> espeak-ng voice, where the language prefix
-# alone isn't the right choice.
-_ESPEAK_VOICES = {
-    "en-us": "en-us",
-    "en-ca": "en-us",
-    "en-gb": "en-gb",
-    "en-au": "en-gb",
-    "en-ie": "en-gb",
-    "en-in": "en-gb",
-    "pt-br": "pt-br",
-    "pt-pt": "pt",
-    "es-mx": "es-419",
-    "zh-cn": "cmn",
-    "zh-tw": "cmn",
-    "zh-hk": "yue",
+PRESETS = {
+    "quick": {"label": "Quick test", "hours": 0.5, "hint": "~30 min, rough"},
+    "good": {"label": "Good", "hours": 3, "hint": "~3 hours"},
+    "best": {"label": "Best", "hours": 8, "hint": "~8 hours"},
+    "unlimited": {"label": "Until I stop it", "hours": 0, "hint": "no time limit"},
 }
+DEFAULT_PRESET = "good"
 
 _CHECKPOINT_EPOCH_SCRIPT = """
 import sys, torch
@@ -50,6 +45,14 @@ ckpt = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
 print(ckpt.get("epoch", 0))
 """
 
+_DEVICE_SCRIPT = """
+import json, torch
+if torch.cuda.is_available():
+    p = torch.cuda.get_device_properties(0)
+    print(json.dumps({"gpu": p.name, "memory_gb": round(p.total_memory / 2**30, 1)}))
+else:
+    print(json.dumps({"gpu": None, "memory_gb": 0}))
+"""
 
 # Runs "python3 -m piper.train" without the val_mos checkpoint callback.
 # The MOS predictor is downloaded on first use; when that fails (offline) the
@@ -78,15 +81,12 @@ main()
 """
 
 
-def default_espeak_voice(language: str) -> str:
-    """Guess an espeak-ng voice from a prompt language code like en-US."""
-    code = language.lower()
-    return _ESPEAK_VOICES.get(code, code.split("-", maxsplit=1)[0])
-
-
 def find_train_python() -> str:
-    """Python from script/setup_training if present, else this interpreter."""
-    setup_python = _REPO_DIR / ".piper1-gpl" / ".venv" / "bin" / "python3"
+    """Python with piper1-gpl training: $PIPER_PYTHON, script/setup's venv, or ours."""
+    if os.environ.get("PIPER_PYTHON"):
+        return os.environ["PIPER_PYTHON"]
+
+    setup_python = _REPO_DIR / ".venv" / "bin" / "python3"
     if setup_python.exists():
         return str(setup_python)
 
@@ -147,49 +147,87 @@ def load_checkpoint_catalog(
     return catalog
 
 
+def suggest_checkpoint(
+    catalog: Dict[str, List[PretrainedCheckpoint]], espeak_voice: str, gender: str
+) -> Optional[PretrainedCheckpoint]:
+    """Best starting checkpoint for a language and voice type."""
+    entries = (
+        catalog.get(espeak_voice)
+        or catalog.get(espeak_voice.split("-")[0])
+        or catalog.get("generic")
+        or []
+    )
+    if not entries:
+        return None
+
+    # Same gender first; lessac is what Piper's own docs fine-tune from
+    return sorted(entries, key=lambda e: (e.gender != gender, "lessac" not in e.name))[
+        0
+    ]
+
+
 # -----------------------------------------------------------------------------
 
 
 @dataclass
 class TrainingSettings:
-    """Settings chosen on the training page."""
+    """Training options. Everything has a sensible default."""
 
-    voice_name: str
-    espeak_voice: str
-    checkpoint: str = ""
-    """Path or URL to a medium quality checkpoint, "latest", or empty (scratch)."""
+    preset: str = DEFAULT_PRESET
+    hours: float = PRESETS[DEFAULT_PRESET]["hours"]
+    """Wall-clock limit in hours (0 = none)."""
 
-    sample_rate: int = 22050
-    batch_size: int = 16
     epochs: int = 0
-    """Epochs to train past the starting checkpoint (0 = until stopped)."""
+    """Epochs to train past the starting checkpoint (0 = no limit)."""
+
+    checkpoint: str = ""
+    """Path/URL of a medium quality checkpoint, "latest", or empty (scratch)."""
+
+    batch_size: int = 0
+    """0 = pick from GPU memory."""
 
     accelerator: str = "auto"
-    test_text: str = "The quick brown fox jumped over the lazy dogs."
+    sample_rate: int = 22050
 
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> "TrainingSettings":
         names = {f.name for f in fields(TrainingSettings)}
-        return TrainingSettings(**{k: v for k, v in data.items() if k in names})
+        settings = TrainingSettings(**{k: v for k, v in data.items() if k in names})
+        if settings.accelerator not in ACCELERATORS:
+            raise ValueError(f"Invalid device: {settings.accelerator}")
+
+        if settings.sample_rate not in (16000, 22050):
+            raise ValueError("Sample rate must be 16000 or 22050")
+
+        settings.hours = max(0.0, float(settings.hours))
+        settings.epochs = max(0, int(settings.epochs))
+        settings.batch_size = max(0, int(settings.batch_size))
+        settings.checkpoint = str(settings.checkpoint).strip()
+        return settings
 
 
 @dataclass
 class Workspace:
-    """Training state and files for one user/language (output/_training/<lang>)."""
+    """Training state for one voice."""
 
-    language: str
-    work_dir: Path
+    voice: Voice
     settings: Optional[TrainingSettings] = None
     state: str = "idle"  # idle, running, succeeded, failed, stopped
-    step: str = ""
+    stage: str = ""  # prepare, download, train, export
+    started: Optional[float] = None
+    finished: Optional[float] = None
+    epoch: Optional[int] = None
     exporting: bool = False
-    log: Deque[str] = field(default_factory=lambda: deque(maxlen=1000))
+    error: str = ""
+    log: Deque[str] = field(default_factory=lambda: deque(maxlen=2000))
+    log_count: int = 0
+    """Total lines ever logged (for incremental streaming)."""
+
     proc: Optional[asyncio.subprocess.Process] = None
-    task: Optional["asyncio.Task[None]"] = None
 
     @property
-    def settings_path(self) -> Path:
-        return self.work_dir / "settings.json"
+    def work_dir(self) -> Path:
+        return self.voice.root / "training"
 
     @property
     def dataset_dir(self) -> Path:
@@ -204,8 +242,12 @@ class Workspace:
         return self.train_dir / "config.json"
 
     @property
-    def voice_dir(self) -> Path:
-        return self.work_dir / "voice"
+    def exports_dir(self) -> Path:
+        return self.voice.root / "exports"
+
+    @property
+    def running(self) -> bool:
+        return self.state == "running"
 
     def latest_checkpoint(self) -> Optional[Path]:
         """Newest checkpoint from the most recent training run."""
@@ -220,85 +262,140 @@ class Workspace:
     def exports(self) -> List[Dict[str, Any]]:
         """Exported voices, newest epoch first."""
         exports = []
-        for export_dir in self.voice_dir.glob("epoch_*"):
-            files = sorted(
-                p.name for p in export_dir.iterdir() if p.suffix in (".onnx", ".json")
-            )
-            if not any(f.endswith(".onnx") for f in files):
+        for export_dir in self.exports_dir.glob("epoch_*"):
+            onnx_files = list(export_dir.glob("*.onnx"))
+            if not onnx_files or not Path(f"{onnx_files[0]}.json").exists():
                 continue
 
             exports.append(
                 {
                     "epoch": int(export_dir.name.split("_", 1)[1]),
                     "dir": export_dir.name,
-                    "files": files,
-                    "wav": "test.wav" if (export_dir / "test.wav").exists() else None,
+                    "model": onnx_files[0].name,
+                    "created": onnx_files[0].stat().st_mtime,
                 }
             )
 
         return sorted(exports, key=lambda e: e["epoch"], reverse=True)
 
-    def to_json(self) -> Dict[str, Any]:
+    def status(self) -> Dict[str, Any]:
         return {
-            "language": self.language,
             "state": self.state,
-            "step": self.step,
+            "stage": self.stage,
+            "started": self.started,
+            "finished": self.finished,
+            "now": time.time(),
+            "epoch": self.epoch,
             "exporting": self.exporting,
+            "error": self.error,
             "hasCheckpoint": self.latest_checkpoint() is not None,
             "exports": self.exports(),
             "settings": asdict(self.settings) if self.settings else None,
-            "log": "\n".join(self.log),
         }
+
+    def lines_since(self, count: int) -> List[str]:
+        """Log lines after the first `count` ever logged."""
+        new = self.log_count - count
+        if new <= 0:
+            return []
+
+        return list(self.log)[-min(new, len(self.log)) :]
 
 
 class TrainingManager:
-    """Runs at most one training job at a time using piper1-gpl."""
+    """Runs at most one training job at a time."""
 
     def __init__(self, python: str) -> None:
         self.python = python
-        self.workspaces: Dict[Path, Workspace] = {}
+        self.workspaces: Dict[str, Workspace] = {}
+        self.device: Dict[str, Any] = {"gpu": None, "memory_gb": 0, "ok": False}
 
-    def get(self, language: str, work_dir: Path) -> Workspace:
-        workspace = self.workspaces.get(work_dir)
+    async def detect_device(self) -> None:
+        """Check that training is installed and find the GPU."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                self.python,
+                "-c",
+                "import piper.train\n" + _DEVICE_SCRIPT,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+            if proc.returncode == 0:
+                self.device = {**json.loads(stdout.decode()), "ok": True}
+            else:
+                self.device["problem"] = stderr.decode(errors="replace")[-500:]
+        except Exception as err:
+            self.device["problem"] = str(err)
+
+        if not self.device["ok"]:
+            _LOGGER.warning("Piper training not available: %s", self.device)
+
+    def default_batch_size(self, accelerator: str) -> int:
+        memory = self.device.get("memory_gb") or 0
+        if (accelerator == "cpu") or (not memory):
+            return 8
+
+        if memory >= 20:
+            return 32
+
+        return 16 if memory >= 10 else 8
+
+    def get(self, voice: Voice) -> Workspace:
+        workspace = self.workspaces.get(voice.name)
         if workspace is None:
-            workspace = Workspace(language=language, work_dir=work_dir)
-            if workspace.settings_path.is_file():
-                workspace.settings = TrainingSettings.from_dict(
-                    json.loads(workspace.settings_path.read_text(encoding="utf-8"))
-                )
-
-            log_path = work_dir / "train.log"
+            workspace = Workspace(voice=voice)
+            log_path = workspace.work_dir / "train.log"
             if log_path.is_file():
                 with open(log_path, "r", encoding="utf-8", errors="replace") as log:
-                    workspace.log.extend(line.rstrip("\n") for line in log)
+                    for line in log:
+                        workspace.log.append(line.rstrip("\n"))
+                        workspace.log_count += 1
 
-            self.workspaces[work_dir] = workspace
+            self.workspaces[voice.name] = workspace
 
         return workspace
 
-    def start(
-        self, workspace: Workspace, recordings_dir: Path, settings: TrainingSettings
-    ) -> None:
-        for other in self.workspaces.values():
-            if other.state == "running":
-                raise RuntimeError(
-                    f"A training job is already running for {other.language}"
-                )
+    def forget(self, voice: Voice) -> None:
+        workspace = self.workspaces.get(voice.name)
+        if (workspace is not None) and (workspace.running or workspace.exporting):
+            raise RuntimeError("Voice is busy")
+
+        self.workspaces.pop(voice.name, None)
+
+    def busy_voice(self) -> Optional[str]:
+        for name, workspace in self.workspaces.items():
+            if workspace.running:
+                return name
+
+        return None
+
+    def start(self, workspace: Workspace, settings: TrainingSettings) -> None:
+        busy = self.busy_voice()
+        if busy is not None:
+            raise RuntimeError(f"Already training {busy}")
 
         if workspace.exporting:
             raise RuntimeError("Wait for the export to finish")
 
+        if not self.device["ok"]:
+            raise RuntimeError(
+                "Piper training is not installed: "
+                + self.device.get("problem", "unknown problem")
+            )
+
         workspace.work_dir.mkdir(parents=True, exist_ok=True)
         workspace.settings = settings
-        workspace.settings_path.write_text(
-            json.dumps(asdict(settings), indent=2), encoding="utf-8"
-        )
         workspace.state = "running"
-        workspace.log.clear()
-        workspace.task = asyncio.create_task(self._train(workspace, recordings_dir))
+        workspace.stage = "prepare"
+        workspace.started = time.time()
+        workspace.finished = None
+        workspace.epoch = None
+        workspace.error = ""
+        asyncio.create_task(self._train(workspace))
 
     async def stop(self, workspace: Workspace) -> None:
-        if workspace.state != "running":
+        if not workspace.running:
             return
 
         workspace.state = "stopped"
@@ -315,9 +412,6 @@ class TrainingManager:
                 except ProcessLookupError:
                     pass
 
-        if workspace.task is not None:
-            workspace.task.cancel()
-
     def start_export(self, workspace: Workspace) -> None:
         if workspace.exporting:
             raise RuntimeError("Already exporting")
@@ -325,45 +419,71 @@ class TrainingManager:
         if workspace.latest_checkpoint() is None:
             raise RuntimeError("No checkpoint to export yet")
 
-        if workspace.settings is None:
-            raise RuntimeError("No training settings found")
-
         workspace.exporting = True
         asyncio.create_task(self._export_guarded(workspace))
 
+    async def speak(self, workspace: Workspace, export_dir: str, text: str) -> bytes:
+        """Synthesize text with an exported voice."""
+        model_paths = list((workspace.exports_dir / export_dir).glob("*.onnx"))
+        if not model_paths:
+            raise FileNotFoundError("Voice not exported")
+
+        proc = await asyncio.create_subprocess_exec(
+            self.python,
+            "-m",
+            "piper",
+            "-m",
+            str(model_paths[0]),
+            "--output-file",
+            "-",  # WAV to stdout
+            "--",
+            text,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(stderr.decode(errors="replace")[-500:])
+
+        return stdout
+
     # -------------------------------------------------------------------------
 
-    async def _train(self, ws: Workspace, recordings_dir: Path) -> None:
+    async def _train(self, ws: Workspace) -> None:
         assert ws.settings is not None
         settings = ws.settings
+        voice = ws.voice
 
         try:
             # 1. Recordings -> dataset (wav/ + metadata.csv)
-            ws.step = "Exporting dataset"
             if ws.dataset_dir.exists():
                 shutil.rmtree(ws.dataset_dir)
 
-            await self._exec(
-                ws,
-                [
-                    sys.executable,
-                    "-m",
-                    "export_dataset",
-                    str(recordings_dir),
-                    str(ws.dataset_dir),
-                ],
-                cwd=_REPO_DIR,
-            )
+            command = [
+                sys.executable,
+                "-m",
+                "export_dataset",
+                str(voice.recordings_dir),
+                str(ws.dataset_dir),
+            ]
+            for extension in AUDIO_EXTENSIONS:
+                command.extend(["--audio-glob", f"*{extension}"])
+
+            await self._exec(ws, command, cwd=_REPO_DIR)
+            self._check_running(ws)
+
             metadata_path = ws.dataset_dir / "metadata.csv"
             num_utterances = sum(
                 1
                 for line in metadata_path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             )
-            if num_utterances < 1:
-                raise RuntimeError("No recordings were exported")
+            if num_utterances < 10:
+                raise RuntimeError(
+                    f"Only {num_utterances} usable recording(s); record at least 10"
+                )
 
-            self._log(ws, f"Exported {num_utterances} utterance(s)")
+            self._log(ws, f"Prepared {num_utterances} recordings")
 
             # 2. Starting checkpoint
             checkpoint_path: Optional[Path] = None
@@ -372,9 +492,10 @@ class TrainingManager:
                 if checkpoint_path is None:
                     raise RuntimeError("No previous checkpoint to continue from")
             elif settings.checkpoint:
-                ws.step = "Getting base checkpoint"
+                ws.stage = "download"
                 checkpoint_path = await self._get_checkpoint(ws, settings.checkpoint)
 
+            self._check_running(ws)
             max_epochs = -1
             if settings.epochs > 0:
                 base_epoch = 0
@@ -384,8 +505,14 @@ class TrainingManager:
                 # Epochs continue counting from the checkpoint
                 max_epochs = base_epoch + settings.epochs
 
+            batch_size = settings.batch_size or self.default_batch_size(
+                settings.accelerator
+            )
+            # Keep a few batches per epoch on small datasets
+            batch_size = max(1, min(batch_size, num_utterances // 4))
+
             # 3. Train
-            ws.step = "Training"
+            ws.stage = "train"
             ws.train_dir.mkdir(parents=True, exist_ok=True)
             command = [
                 self.python,
@@ -395,7 +522,7 @@ class TrainingManager:
                 "--model.mos_metric",
                 "none",
                 "--data.voice_name",
-                settings.voice_name,
+                voice.name,
                 "--data.csv_path",
                 str(metadata_path),
                 "--data.audio_dir",
@@ -403,17 +530,17 @@ class TrainingManager:
                 "--model.sample_rate",
                 str(settings.sample_rate),
                 "--data.espeak_voice",
-                settings.espeak_voice,
+                voice.espeak_voice,
                 "--data.cache_dir",
                 str(
                     ws.work_dir
                     / "cache"
-                    / f"{settings.espeak_voice}_{settings.sample_rate}"
+                    / f"{voice.espeak_voice}_{settings.sample_rate}"
                 ),
                 "--data.config_path",
                 str(ws.config_path),
                 "--data.batch_size",
-                str(settings.batch_size),
+                str(batch_size),
                 "--trainer.max_epochs",
                 str(max_epochs),
                 "--trainer.accelerator",
@@ -421,60 +548,82 @@ class TrainingManager:
                 "--trainer.default_root_dir",
                 str(ws.train_dir),
             ]
+            if settings.hours > 0:
+                minutes = max(1, round(settings.hours * 60))
+                command.extend(
+                    [
+                        "--trainer.max_time",
+                        f"{minutes // 1440:02}:{minutes // 60 % 24:02}:{minutes % 60:02}:00",
+                    ]
+                )
+
             if checkpoint_path is not None:
                 command.extend(["--ckpt_path", str(checkpoint_path)])
 
             self._log(
                 ws,
-                "Training until stopped"
-                if max_epochs < 0
-                else f"Training until epoch {max_epochs}",
+                f"Training with batch size {batch_size}"
+                + (f" for {settings.hours:g} hour(s)" if settings.hours > 0 else "")
+                + (f" until epoch {max_epochs}" if max_epochs > 0 else ""),
             )
             await self._exec(ws, command)
-
             ws.state = "succeeded"
-            ws.step = "Done"
-        except asyncio.CancelledError:
-            ws.state = "stopped"
-            self._log(ws, "Stopped")
         except Exception as err:
-            _LOGGER.exception("Training failed")
-            if ws.state == "running":
+            if ws.running:
+                _LOGGER.exception("Training failed")
                 ws.state = "failed"
+                ws.error = str(err)
                 self._log(ws, f"ERROR: {err}")
         finally:
             ws.proc = None
-            ws.step = "" if ws.state != "succeeded" else ws.step
+            ws.finished = time.time()
 
-        # Always leave a usable voice behind when training finishes on its own
-        if (ws.state == "succeeded") and (not ws.exporting):
+        # Leave a usable voice behind whenever training ran
+        if (
+            (ws.state in ("succeeded", "stopped"))
+            and (ws.latest_checkpoint() is not None)
+            and (not ws.exporting)
+        ):
             ws.exporting = True
             await self._export_guarded(ws)
 
+        ws.stage = ""
+
+    def _check_running(self, ws: Workspace) -> None:
+        if not ws.running:
+            raise RuntimeError("Stopped")
+
     async def _export_guarded(self, ws: Workspace) -> None:
+        stage = ws.stage
+        ws.stage = "export"
         try:
             await self._export(ws)
         except Exception as err:
             _LOGGER.exception("Export failed")
+            ws.error = f"Export failed: {err}"
             self._log(ws, f"ERROR: export failed: {err}")
         finally:
             ws.exporting = False
+            ws.stage = stage if ws.running else ""
 
     async def _export(self, ws: Workspace) -> None:
-        """Export newest checkpoint to onnx and synthesize a test sentence."""
-        assert ws.settings is not None
+        """Export newest checkpoint to onnx for Piper / Home Assistant."""
+        voice = ws.voice
         checkpoint_path = ws.latest_checkpoint()
         if checkpoint_path is None:
             raise RuntimeError("No checkpoint to export")
 
         epoch = await self._checkpoint_epoch(ws, checkpoint_path)
-        export_dir = ws.voice_dir / f"epoch_{epoch}"
-        export_dir.mkdir(parents=True, exist_ok=True)
+        export_dir = ws.exports_dir / f"epoch_{epoch}"
+        tmp_dir = ws.exports_dir / f".epoch_{epoch}.tmp"
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+
+        tmp_dir.mkdir(parents=True)
 
         # Piper naming convention, e.g. en_US-my_voice-medium.onnx
-        lang_code = ws.language.replace("-", "_")
-        onnx_path = export_dir / f"{lang_code}-{ws.settings.voice_name}-medium.onnx"
-        self._log(ws, f"[export] Exporting epoch {epoch} from {checkpoint_path}")
+        onnx_path = tmp_dir / f"{voice.model_stem}.onnx"
+        self._log(ws, f"Exporting epoch {epoch}")
         await self._exec(
             ws,
             [
@@ -489,33 +638,20 @@ class TrainingManager:
             track=False,
         )
 
-        # Fields Home Assistant expects (same fix-ups as TextyMcSpeechy's exporter)
+        # Fields Home Assistant expects (as in TextyMcSpeechy's exporter)
         config = json.loads(ws.config_path.read_text(encoding="utf-8"))
-        config["dataset"] = ws.settings.voice_name
+        config["dataset"] = voice.name
         config.setdefault("audio", {})["quality"] = "medium"
-        config.setdefault("language", {})["code"] = lang_code
+        config.setdefault("language", {})["code"] = voice.language.replace("-", "_")
         Path(f"{onnx_path}.json").write_text(
             json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
-        if ws.settings.test_text.strip():
-            await self._exec(
-                ws,
-                [
-                    self.python,
-                    "-m",
-                    "piper",
-                    "-m",
-                    str(onnx_path),
-                    "-f",
-                    str(export_dir / "test.wav"),
-                    "--",
-                    ws.settings.test_text.strip(),
-                ],
-                track=False,
-            )
+        if export_dir.exists():
+            shutil.rmtree(export_dir)
 
-        self._log(ws, f"[export] Voice written to {export_dir}")
+        tmp_dir.rename(export_dir)
+        self._log(ws, f"Voice ready: epoch {epoch}")
 
     async def _checkpoint_epoch(self, ws: Workspace, checkpoint_path: Path) -> int:
         """Read the epoch stored in a checkpoint (falls back to its file name)."""
@@ -556,7 +692,9 @@ class TrainingManager:
 
         Only tracked processes (training) are interrupted by stop().
         """
-        self._log(ws, "$ " + " ".join(command))
+        self._log(
+            ws, "$ " + " ".join(c if "\n" not in c else "<script>" for c in command)
+        )
         proc = await asyncio.create_subprocess_exec(
             *command,
             cwd=str(cwd) if cwd else None,
@@ -597,17 +735,16 @@ class TrainingManager:
 
             return path
 
-        # Cache downloads next to the per-language work dirs.
-        # Keep the voice name since some files are just "<voice>-<n>.ckpt".
+        # Shared download cache; keep the voice name since some files are
+        # just "<voice>-<n>.ckpt".
         url_path = urllib.parse.urlparse(checkpoint).path
         parts = [urllib.parse.unquote(p) for p in url_path.split("/") if p]
-        name = "_".join(parts[-3:])
-        path = ws.work_dir.parent / "checkpoints" / name
+        path = ws.voice.root.parent.parent / "checkpoints" / "_".join(parts[-3:])
         if path.is_file():
-            self._log(ws, f"Using cached checkpoint {path}")
+            self._log(ws, f"Using cached base voice {path.name}")
             return path
 
-        self._log(ws, f"Downloading {checkpoint}")
+        self._log(ws, f"Downloading base voice {checkpoint}")
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".part")
 
@@ -619,12 +756,18 @@ class TrainingManager:
 
         await asyncio.to_thread(download)
         tmp_path.rename(path)
-        self._log(ws, f"Saved checkpoint to {path}")
+        self._log(ws, f"Saved base voice to {path}")
         return path
 
     def _log(self, ws: Workspace, line: str) -> None:
         ws.log.append(line)
+        ws.log_count += 1
+        match = re.match(r"^Epoch (\d+):", line)
+        if match:
+            ws.epoch = int(match.group(1))
+
         try:
+            ws.work_dir.mkdir(parents=True, exist_ok=True)
             with open(ws.work_dir / "train.log", "a", encoding="utf-8") as log_file:
                 print(line, file=log_file)
         except OSError:

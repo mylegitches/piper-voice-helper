@@ -1,4 +1,7 @@
 *
-!requirements.txt
+!app/
+!export_dataset/
 !prompts/
-!piper_recording_studio/
+!script/install_piper
+!requirements.txt
+**/__pycache__

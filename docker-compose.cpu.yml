@@ -1,0 +1,10 @@
+# CPU only: recording and testing work fine, training is very slow.
+services:
+  piper-voice-helper:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/data
+    shm_size: 4gb
+    restart: unless-stopped

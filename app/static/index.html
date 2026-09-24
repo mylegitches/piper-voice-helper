@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Piper Voice Helper</title>
+  <link rel="icon" href="/static/logo.png" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Piper Voice Helper</h1>
+      <p class="subtitle">Record your voice, click Train, and use it in Home Assistant.</p>
+    </header>
+
+    <div id="device-banner" class="banner banner--warning hidden"></div>
+
+    <!-- 1. Voice -->
+    <section class="card">
+      <h2><span class="step">1</span> Voice</h2>
+      <div class="row">
+        <select id="voice-select" class="grow">
+          <option value="">— choose a voice —</option>
+        </select>
+        <button id="new-voice-btn" class="btn btn--secondary">+ New voice</button>
+      </div>
+
+      <form id="new-voice-form" class="new-voice hidden">
+        <div class="grid">
+          <label>Name
+            <input id="new-name" required maxlength="40" placeholder="e.g. dad" autocomplete="off" />
+          </label>
+          <label>Language
+            <select id="new-language"></select>
+          </label>
+          <label>Sounds like
+            <select id="new-gender">
+              <option value="female">Female voice</option>
+              <option value="male">Male voice</option>
+            </select>
+          </label>
+        </div>
+        <div class="row">
+          <button type="submit" class="btn btn--primary">Create voice</button>
+          <button type="button" id="cancel-new-voice" class="btn btn--ghost">Cancel</button>
+        </div>
+      </form>
+
+      <p id="voice-summary" class="hint"></p>
+    </section>
+
+    <!-- 2. Record -->
+    <section id="record-card" class="card hidden">
+      <h2><span class="step">2</span> Record</h2>
+
+      <div class="readiness">
+        <div class="readiness-bar"><div id="readiness-fill"></div>
+          <span class="mark" style="left: 5%">50</span>
+          <span class="mark" style="left: 30%">300</span>
+          <span class="mark" style="left: 100%">1000</span>
+        </div>
+        <p class="hint"><strong id="recorded-count">0</strong> recordings · <span id="readiness-text"></span></p>
+      </div>
+
+      <div id="prompt-box" class="prompt-box">
+        <p id="prompt-text" class="prompt-text">Loading…</p>
+      </div>
+
+      <div class="vu"><div id="vu-bar"></div></div>
+
+      <div class="row controls">
+        <button id="record-btn" class="btn btn--record">● Record <kbd>R</kbd></button>
+        <button id="play-btn" class="btn btn--secondary" disabled>▶ Play <kbd>P</kbd></button>
+        <button id="save-btn" class="btn btn--primary" disabled>✓ Save &amp; next <kbd>S</kbd></button>
+        <button id="skip-btn" class="btn btn--ghost">Skip <kbd>K</kbd></button>
+      </div>
+      <div class="row">
+        <select id="mic-select" class="grow"><option value="">Default microphone</option></select>
+      </div>
+      <p id="record-status" class="hint">Read each sentence naturally in a quiet room. Press Record, read, press Record again to stop.</p>
+      <audio id="playback" class="hidden"></audio>
+
+      <details class="upload">
+        <summary>Already have recordings? Upload a .zip</summary>
+        <p class="hint">Either <code>metadata.csv</code> (<code>file|text</code> per line) with the audio files, or each audio file next to a <code>.txt</code> with its transcript. WAV, FLAC, MP3, OGG and WebM work.</p>
+        <div class="row">
+          <input type="file" id="upload-input" accept=".zip" class="grow" />
+          <button id="upload-btn" class="btn btn--secondary">Upload</button>
+        </div>
+      </details>
+    </section>
+
+    <!-- 3. Train -->
+    <section id="train-card" class="card hidden">
+      <h2><span class="step">3</span> Train</h2>
+
+      <div id="presets" class="presets"></div>
+
+      <details id="advanced" class="advanced">
+        <summary>Advanced settings</summary>
+        <div class="grid">
+          <label class="wide">Start from
+            <select id="checkpoint-select"></select>
+            <input id="checkpoint-input" class="hidden" placeholder="/path/to/checkpoint.ckpt or https://…" />
+            <span class="hint">Fine-tuning a similar voice is far faster than from scratch. Hear them at <a href="https://rhasspy.github.io/piper-samples/" target="_blank">piper-samples</a>.</span>
+          </label>
+          <label>Hours (0 = no limit)
+            <input id="hours-input" type="number" min="0" step="0.5" />
+          </label>
+          <label>Max epochs (0 = no limit)
+            <input id="epochs-input" type="number" min="0" step="100" />
+          </label>
+          <label>Batch size (0 = auto)
+            <input id="batch-input" type="number" min="0" step="1" />
+          </label>
+          <label>Device
+            <select id="device-select"></select>
+          </label>
+          <label>Sample rate
+            <select id="rate-select">
+              <option value="22050">22050 Hz (standard)</option>
+              <option value="16000">16000 Hz</option>
+            </select>
+          </label>
+        </div>
+      </details>
+
+      <div class="row">
+        <button id="train-btn" class="btn btn--primary btn--big">Train</button>
+        <button id="stop-btn" class="btn btn--danger btn--big hidden">■ Stop</button>
+      </div>
+
+      <div id="progress" class="hidden">
+        <div class="progress-header">
+          <span id="progress-label" class="progress-label"></span>
+          <div class="stages">
+            <span data-stage="prepare" class="stage">Prepare</span><span class="stage-sep">›</span>
+            <span data-stage="download" class="stage">Download</span><span class="stage-sep">›</span>
+            <span data-stage="train" class="stage">Train</span><span class="stage-sep">›</span>
+            <span data-stage="export" class="stage">Export</span>
+          </div>
+        </div>
+        <div class="timebar"><div id="timebar-fill"></div></div>
+        <details class="log-details">
+          <summary>Log</summary>
+          <pre id="log-panel" class="log-panel"></pre>
+        </details>
+      </div>
+      <div id="train-error" class="banner banner--error hidden"></div>
+    </section>
+
+    <!-- 4. Test & install -->
+    <section id="test-card" class="card hidden">
+      <h2><span class="step">4</span> Test &amp; install</h2>
+      <p id="no-exports" class="hint">Your voice appears here after training. While training runs you can export the latest version to hear how it's going.</p>
+
+      <div id="export-area" class="hidden">
+        <div class="row">
+          <label class="grow">Version
+            <select id="export-select"></select>
+          </label>
+        </div>
+        <div class="row">
+          <input id="speak-input" class="grow" maxlength="500" />
+          <button id="speak-btn" class="btn btn--primary">🔊 Speak</button>
+        </div>
+        <audio id="speak-audio" controls class="hidden"></audio>
+
+        <div class="row">
+          <a id="dl-zip" class="btn btn--download" download>Download for Home Assistant (.zip)</a>
+          <a id="dl-onnx" class="btn btn--secondary" download>.onnx</a>
+          <a id="dl-json" class="btn btn--secondary" download>.onnx.json</a>
+        </div>
+
+        <ol class="howto">
+          <li>In Home Assistant open <strong>Settings → Add-ons → Piper → Open Web UI</strong> and upload the <code>.onnx</code> and <code>.onnx.json</code> files from the zip (or copy them to <code>/share/piper</code>).</li>
+          <li>Restart the Piper add-on if the voice doesn't show up.</li>
+          <li>Go to <strong>Settings → Voice assistants</strong>, edit your assistant and pick <strong id="howto-name"></strong> as the voice.</li>
+        </ol>
+      </div>
+
+      <button id="export-btn" class="btn btn--secondary hidden">Export latest version now</button>
+    </section>
+
+    <footer class="hint">
+      Training by <a href="https://github.com/OHF-Voice/piper1-gpl">Piper</a> ·
+      recorder from <a href="https://github.com/rhasspy/piper-recording-studio">Piper Recording Studio</a> ·
+      base voices via <a href="https://github.com/domesticatedviking/TextyMcSpeechy">TextyMcSpeechy</a>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

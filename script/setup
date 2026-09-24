@@ -1,32 +1,15 @@
-#!/usr/bin/env python3
-import argparse
-import subprocess
-import venv
-from pathlib import Path
+#!/usr/bin/env bash
+# Non-Docker install: creates .venv with the web app and piper1-gpl training.
+# Needs: python3 (3.10+) with venv, git, ffmpeg, build-essential, cmake, ninja-build
+set -euo pipefail
 
-_DIR = Path(__file__).parent
-_PROGRAM_DIR = _DIR.parent
-_VENV_DIR = _PROGRAM_DIR / ".venv"
+repo_dir="$( cd "$( dirname "$0" )/.." && pwd )"
+cd "${repo_dir}"
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--dev", action="store_true", help="Install dev requirements")
-args = parser.parse_args()
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install -r requirements.txt
+script/install_piper "${repo_dir}/.venv/bin/python3" "${repo_dir}/.piper1-gpl"
 
-# Create virtual environment
-builder = venv.EnvBuilder(with_pip=True)
-context = builder.ensure_directories(_VENV_DIR)
-builder.create(_VENV_DIR)
-
-# Upgrade dependencies
-pip = [context.env_exe, "-m", "pip"]
-subprocess.check_call(pip + ["install", "--upgrade", "pip"])
-subprocess.check_call(pip + ["install", "--upgrade", "setuptools", "wheel"])
-
-# Install requirements
-subprocess.check_call(pip + ["install", "-r", str(_PROGRAM_DIR / "requirements.txt")])
-
-if args.dev:
-    # Install dev requirements
-    subprocess.check_call(
-        pip + ["install", "-r", str(_PROGRAM_DIR / "requirements_dev.txt")]
-    )
+echo
+echo "Done. Start with: script/run   (then open http://localhost:8000)"

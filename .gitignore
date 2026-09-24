@@ -4,14 +4,9 @@
 tmp/
 
 *.py[cod]
-*.egg
-build
-htmlcov
+__pycache__/
+.mypy_cache/
 
 /.venv/
-.mypy_cache/
-__pycache__/
-
-/output/
-
 /.piper1-gpl/
+/data/

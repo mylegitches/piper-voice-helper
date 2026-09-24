@@ -1,3 +1,5 @@
-hypercorn==0.14.3
-quart==0.21.0
-Werkzeug==3.1.8
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29,<1
+python-multipart>=0.0.9
+numpy
+onnxruntime>=1.11.0,<2

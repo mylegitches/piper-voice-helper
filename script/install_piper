@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# Installs piper1-gpl (https://github.com/OHF-Voice/piper1-gpl) with training
+# support into the current Python environment. Used by the Dockerfile and
+# script/setup.
+#
+# Usage: script/install_piper <python3> <checkout dir>
+# Needs: git, build-essential, cmake, ninja-build
+set -euo pipefail
+
+python="$1"
+piper_dir="$2"
+piper_ref="${PIPER_REF:-5b355b110aecf3de8f4e000ede1ce06831acff35}"
+
+if [ ! -d "${piper_dir}/.git" ]; then
+    git clone --filter=blob:none https://github.com/OHF-Voice/piper1-gpl.git "${piper_dir}"
+fi
+
+cd "${piper_dir}"
+git fetch --depth 1 origin "${piper_ref}"
+git checkout --detach FETCH_HEAD
+
+"${python}" -m pip install --upgrade pip wheel setuptools scikit-build cython
+"${python}" -m pip install -e '.[train]'
+# onnx export dependencies missing from piper1-gpl's [train] extras
+"${python}" -m pip install onnx onnxscript
+
+# Cython alignment + espeak-ng bridge (dev build, per docs/TRAINING.md)
+(
+    cd src/piper/train/vits/monotonic_align
+    mkdir -p monotonic_align
+    rm -f core.c
+    "${python}" -m Cython.Build.Cythonize -i core.pyx
+    mv core*.so monotonic_align/
+)
+"${python}" setup.py build_ext --inplace
+
+"${python}" -c 'import piper.train.vits.monotonic_align, piper.espeakbridge'
+echo "piper1-gpl installed from ${piper_dir}"

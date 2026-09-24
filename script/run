@@ -1,12 +1,6 @@
-#!/usr/bin/env python3
-import sys
-import subprocess
-import venv
-from pathlib import Path
-
-_DIR = Path(__file__).parent
-_PROGRAM_DIR = _DIR.parent
-_VENV_DIR = _PROGRAM_DIR / ".venv"
-
-context = venv.EnvBuilder().ensure_directories(_VENV_DIR)
-subprocess.check_call([context.env_exe, "-m", "piper_recording_studio"] + sys.argv[1:])
+#!/usr/bin/env bash
+# Starts the web app from script/setup's .venv on http://localhost:8000
+set -euo pipefail
+repo_dir="$( cd "$( dirname "$0" )/.." && pwd )"
+cd "${repo_dir}"
+exec .venv/bin/python3 -m uvicorn app.main:app --host "${HOST:-127.0.0.1}" --port "${PORT:-8000}" "$@"

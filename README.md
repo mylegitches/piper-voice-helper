@@ -1,128 +1,74 @@
 # Piper Voice Helper
 
-Record yourself and train a [Piper text to speech](https://github.com/OHF-Voice/piper1-gpl) voice from the same web UI.
+A web app that turns your voice into a [Piper](https://github.com/OHF-Voice/piper1-gpl) text-to-speech voice for Home Assistant. No coding, no command line after setup, everything runs locally.
 
-Based on [Piper Recording Studio](https://github.com/rhasspy/piper-recording-studio) by Michael Hansen (MIT), with an added **Train Voice** button.
+**Record** sentences in the browser → click **Train** → **listen** to it → **download** for Home Assistant.
 
-![Screen shot](etc/screenshot.jpg)
+---
 
-[![Sponsored by Nabu Casa](etc/nabu_casa_sponsored.png)](https://nabucasa.com)
+## Quick start
 
+Requirements: Docker, ~15 GB of disk, and an NVIDIA GPU with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) (strongly recommended; CPU training takes days).
 
-## Tutorial
-
-See a [video tutorial](https://www.youtube.com/watch?v=Z1pptxLT_3I) by [Thorsten Müller](https://www.thorsten-voice.de/)
-
-
-## Docker
-
-``` sh
-docker run -it -p 8000:8000 -v '/path/to/output:/app/output' rhasspy/piper-recording-studio
+```bash
+git clone https://github.com/mylegitches/piper-voice-helper.git
+cd piper-voice-helper
+docker compose up --build
 ```
 
-Visit http://localhost:8000 to select a language and start recording.
+Open **http://localhost:8000**.
 
-Add `--help` to see more options.
+No GPU? `docker compose -f docker-compose.cpu.yml up --build` (recording and testing are fine, training is very slow).
 
+## Using it
 
-### Building
+1. **Voice**: create a voice with a name, language and whether it should sound female or male (this picks a similar pretrained voice to start from).
+2. **Record**: read the sentences shown. Keys: `R` record/stop, `P` play back, `S` save & next, `K` skip. 50 recordings is the minimum, 300+ sounds much better. Already have recordings? Upload a zip (`metadata.csv` with `file|text` lines plus audio, or audio files with matching `.txt` transcripts).
+3. **Train**: pick how long and click **Train**:
 
-``` sh
-docker build . -t rhasspy/piper-recording-studio
+   | Preset | Time | |
+   |---|---|---|
+   | Quick test | 30 min | rough, to check everything works |
+   | **Good** (default) | 3 hours | |
+   | Best | 8 hours | |
+   | Until I stop it | no limit | press **Stop** when it sounds right |
+
+   **Advanced settings** has the starting voice, hours, max epochs, batch size (auto-picked from GPU memory), device and sample rate. **Train more** continues where the last run stopped.
+4. **Test & install**: type anything and click **Speak**. During training, **Export latest version now** lets you hear progress. Then click **Download for Home Assistant**:
+   1. In Home Assistant open **Settings → Add-ons → Piper → Open Web UI** and upload the `.onnx` and `.onnx.json` files (or copy them to `/share/piper`).
+   2. Restart the Piper add-on if the voice doesn't show up.
+   3. In **Settings → Voice assistants**, pick your voice.
+
+Everything is stored in `./data/` (voices, recordings, training runs, downloaded base voices).
+
+## Home Assistant compatibility
+
+Voices are trained with piper1-gpl, the current Piper. Home Assistant's Piper add-on runs `wyoming-piper`, which uses the same `piper-tts` package (1.8+), so the old `rhasspy/piper` is not needed. Files are named `<lang>-<name>-medium.onnx` and the `.onnx.json` has the fields Home Assistant expects.
+
+## Without Docker
+
+Needs Python 3.10+, `git`, `ffmpeg`, `build-essential`, `cmake` and `ninja-build`:
+
+```bash
+script/setup   # creates .venv with the app and piper1-gpl training
+script/run     # http://localhost:8000
 ```
 
+## How it works
 
-## Installing without Docker
-
-``` sh
-git clone https://github.com/rhasspy/piper-recording-studio.git
-cd piper-recording-studio/
-
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install --upgrade pip
-python3 -m pip install -r requirements.txt
+```
+recordings → trim silence (Silero VAD) → dataset → piper1-gpl fine-tune → ONNX + .onnx.json
 ```
 
+- **FastAPI** serves a single page and streams training progress with server-sent events.
+- Training fine-tunes a medium-quality checkpoint from [piper-checkpoints](https://huggingface.co/datasets/rhasspy/piper-checkpoints), chosen from [TextyMcSpeechy](https://github.com/domesticatedviking/TextyMcSpeechy)'s per-language lists (multi-speaker checkpoints are excluded).
+- Training stops at the time limit (Lightning `max_time`), the epoch limit, or **Stop**. The latest checkpoint is then exported automatically.
+- One training job at a time; a second request gets HTTP 409.
+- Two workarounds for current piper1-gpl: the MOS checkpoint callback is disabled so training works offline, and ONNX export uses torch's TorchScript exporter because the dynamo exporter (default since torch 2.9) fails on Piper models.
 
-## Running without Docker
+## Credits
 
-``` sh
-python3 -m piper_recording_studio
-```
-
-Visit http://localhost:8000 to select a language and start recording.
-
-Prompts are in the `prompts/` directory with the following format:
-
-* Language directories are named `<language name>_<language code>`
-* Each `.txt` in a language directory contains lines with:
-    * `<id>\t<text>` or
-    * `text` (id is automatically assigned based on line number)
-
-Output audio is written to `output/`
-
-See `--debug` for more options.
-
-
-## Exporting
-
-Install ffmpeg:
-
-``` sh
-sudo apt-get install ffmpeg
-```
-
-Install exporting dependencies:
-
-``` sh
-python3 -m pip install -r requirements_export.txt
-```
-
-Export recordings for a language to a Piper-compatible dataset (LJSpeech format):
-
-``` sh
-python3 -m export_dataset output/<language>/ /path/to/dataset
-```
-
-Requires a non-Docker install. If you used Docker to record your dataset, you may need to adjust the permissions of the output directory:
-
-``` sh
-sudo chown -R "$(id -u):$(id -u)" output/
-```
-
-See `--help` for more options. You may need to adjust the silence detection parameters to correctly remove button clicks and keypresses.
-
-
-## Training
-
-Training uses [piper1-gpl](https://github.com/OHF-Voice/piper1-gpl), with a workflow modeled on
-[TextyMcSpeechy](https://github.com/domesticatedviking/TextyMcSpeechy): fine-tune a pretrained checkpoint,
-listen to checkpoints while training runs, and stop when the voice sounds right.
-
-Install piper1-gpl training once (needs `build-essential cmake ninja-build`; a CUDA GPU is strongly recommended):
-
-``` sh
-script/setup_training
-```
-
-This creates `.piper1-gpl/`, which the studio uses automatically (override with `--train-python /path/to/python3`).
-
-Pick a language on the home page (or finish recording) and click **Train Voice**:
-
-* **Starting checkpoint**: medium-quality [pretrained checkpoints](https://huggingface.co/datasets/rhasspy/piper-checkpoints) from TextyMcSpeechy's per-language lists (listen at [piper-samples](https://rhasspy.github.io/piper-samples/)), a custom path/URL, "continue from this voice's latest checkpoint", or none (from scratch). Downloads are cached in `output/_training/checkpoints/`.
-* **Epochs**: `0` trains until you press **Stop**; otherwise the number of epochs past the starting checkpoint.
-* **Export & test latest checkpoint**: works during or after training. It writes `voice/epoch_<N>/<lang>-<name>-medium.onnx` + `.onnx.json` (with the fields Home Assistant expects) and speaks the test sentence so you can play it in the page.
-
-Training runs `export_dataset` on your recordings first (install `ffmpeg` and `requirements_export.txt`). Work files and `train.log` go to `output/_training/<language>/`. One job runs at a time. Training is not available in the Docker image.
-
-Compatibility notes: the MOS checkpoint callback is disabled so training works offline, and ONNX export uses torch's TorchScript exporter because the default dynamo exporter in torch 2.9+ fails on Piper models.
-
-
-## Multi-User Mode
-
-``` sh
-python3 -m piper_recording_studio --multi-user
-```
-
-Now a "login code" will be required to record. A directory `output/user_<code>/<language>` must exist for each user and language.
+- [Piper Recording Studio](https://github.com/rhasspy/piper-recording-studio) by Michael Hansen (MIT): prompts, recorder approach and dataset export (`export_dataset/`, `prompts/`, see `LICENSE.md`)
+- [TextyMcSpeechy](https://github.com/domesticatedviking/TextyMcSpeechy) by Erik Bjorgan (MIT): pretrained checkpoint lists and training workflow (`app/checkpoints/`)
+- [piper1-gpl](https://github.com/OHF-Voice/piper1-gpl) (GPL-3.0): training and synthesis, installed at build time
+- UI modeled on [easy-wakeword-trainer](https://github.com/mylegitches/easy-wakeword-trainer)
