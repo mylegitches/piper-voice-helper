@@ -19,7 +19,9 @@ cd "${piper_dir}"
 git fetch --depth 1 origin "${piper_ref}"
 git checkout --detach FETCH_HEAD
 
-"${python}" -m pip install --upgrade pip wheel setuptools scikit-build cython
+# piper1-gpl needs CMake >= 3.26; distro packages (e.g. Debian bookworm: 3.25)
+# can be older, so use the PyPI build, which lands first on PATH.
+"${python}" -m pip install --upgrade pip wheel setuptools scikit-build cython 'cmake>=3.26,<4' ninja
 "${python}" -m pip install -e '.[train]'
 # onnx export dependencies missing from piper1-gpl's [train] extras
 "${python}" -m pip install onnx onnxscript
