@@ -738,8 +738,8 @@ async function main() {
 
   if (!micAvailable()) {
     showMicProblem('Browsers only allow the microphone on http://localhost or HTTPS. '
-      + 'Open this page through an SSH tunnel (ssh -L 8000:localhost:8000 you@server, then '
-      + 'http://localhost:8000), or upload recordings as a zip below.');
+      + 'Open this page through an SSH tunnel (ssh -L 8576:localhost:8576 you@server, then '
+      + 'http://localhost:8576), or upload recordings as a zip below.');
     $('#mic-test-btn').disabled = true;
     $('#mic-select').disabled = true;
   } else {
