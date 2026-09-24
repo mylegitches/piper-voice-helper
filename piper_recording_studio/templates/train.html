@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+
+    <head>
+        <title>Train</title>
+
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+        <meta name="description" content="Train a Piper voice">
+
+        <link href="css/bootstrap.min.css" rel="stylesheet">
+        <link href="css/fontawesome-all.min.css" rel="stylesheet">
+        <style>
+         #log {
+             height: 24rem;
+             overflow-y: auto;
+             white-space: pre-wrap;
+             font-size: 0.8rem;
+             background: #212529;
+             color: #f8f9fa;
+             padding: 0.75rem;
+         }
+        </style>
+    </head>
+    <body>
+        <header>
+            <nav class="navbar navbar-expand-md bg-light">
+                <a href="/">
+                    <img id="logo" src="img/logo.png" alt="Piper logo" style="height: 3em;" />
+                </a>
+                <a class="btn btn-outline-danger ml-auto" href="record?language={{ language | urlencode }}&userId={{ user_id | urlencode }}">
+                    <i class="fas fa-microphone mr-1"></i>
+                    Record More
+                </a>
+            </nav>
+        </header>
+
+        <div class="container mt-3">
+            <h3>Train voice: {{ language_name }} ({{ language }})</h3>
+            <p>
+                Recorded <strong>{{ num_recorded }}</strong> of {{ num_items }} prompts.
+                {% if num_recorded < 100: %}
+                <span class="text-warning">Fine-tuning works best with at least a few hundred recordings.</span>
+                {% endif %}
+            </p>
+
+            <div id="alert" class="alert alert-info" hidden></div>
+
+            <form id="form">
+                <input type="hidden" name="language" value="{{ language }}">
+                <input type="hidden" name="userId" value="{{ user_id }}">
+
+                <div class="form-row">
+                    <div class="form-group col-md-6">
+                        <label for="voiceName">Voice name</label>
+                        <input id="voiceName" name="voiceName" class="form-control" value="{{ settings.voice_name }}" pattern="[A-Za-z0-9_]+" required>
+                        <small class="form-text text-muted">Letters, numbers and _ only. Output: {{ language | replace('-', '_') }}-&lt;name&gt;-medium.onnx</small>
+                    </div>
+                    <div class="form-group col-md-6">
+                        <label for="espeakVoice">espeak-ng voice</label>
+                        <input id="espeakVoice" name="espeakVoice" class="form-control" value="{{ settings.espeak_voice }}" required>
+                        <small class="form-text text-muted">Used for phonemization (see <code>espeak-ng --voices</code>)</small>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="checkpoint">Base checkpoint (path or URL)</label>
+                    <input id="checkpoint" name="checkpoint" class="form-control" value="{{ settings.checkpoint }}">
+                    <small class="form-text text-muted">
+                        A medium-quality checkpoint from
+                        <a href="https://huggingface.co/datasets/rhasspy/piper-checkpoints/tree/main" target="_blank">piper-checkpoints</a>.
+                        Fine-tuning is much faster than training from scratch (leave empty), even across languages.
+                    </small>
+                </div>
+
+                <div class="form-row">
+                    <div class="form-group col-md-3">
+                        <label for="epochs">Epochs</label>
+                        <input id="epochs" name="epochs" type="number" min="1" class="form-control" value="{{ settings.epochs }}" required>
+                        <small class="form-text text-muted">On top of the checkpoint's</small>
+                    </div>
+                    <div class="form-group col-md-3">
+                        <label for="batchSize">Batch size</label>
+                        <input id="batchSize" name="batchSize" type="number" min="1" class="form-control" value="{{ settings.batch_size }}" required>
+                        <small class="form-text text-muted">Lower if you run out of GPU memory</small>
+                    </div>
+                    <div class="form-group col-md-3">
+                        <label for="sampleRate">Sample rate</label>
+                        <select id="sampleRate" name="sampleRate" class="form-control">
+                            {% for rate in [22050, 16000]: %}
+                            <option value="{{ rate }}" {% if rate == settings.sample_rate %}selected{% endif %}>{{ rate }} Hz</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="form-group col-md-3">
+                        <label for="accelerator">Device</label>
+                        <select id="accelerator" name="accelerator" class="form-control">
+                            {% for acc in accelerators: %}
+                            <option value="{{ acc }}" {% if acc == settings.accelerator %}selected{% endif %}>{{ acc }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+
+                <button id="train" type="submit" class="btn btn-lg btn-success">
+                    <i class="fas fa-cogs mr-1"></i>
+                    Train
+                </button>
+                <button id="stop" type="button" class="btn btn-lg btn-danger" hidden>
+                    <i class="fas fa-stop mr-1"></i>
+                    Stop
+                </button>
+                <small class="text-muted ml-2">Backend: {{ backend }}</small>
+            </form>
+
+            <div id="downloads" class="mt-3" hidden>
+                <h5>Your voice</h5>
+                <ul id="downloadList"></ul>
+            </div>
+
+            <div class="mt-3">
+                <label>Status: <strong id="state">idle</strong> <span id="step" class="text-muted"></span></label>
+                <div id="log"></div>
+            </div>
+        </div>
+
+        <script>
+         const language = {{ language | tojson }};
+         const userId = {{ user_id | tojson }};
+         let pollTimer = null;
+
+         function q(id) {
+             return document.querySelector(id);
+         }
+
+         function setAlert(text, className) {
+             q('#alert').className = 'alert ' + className;
+             q('#alert').textContent = text;
+             q('#alert').hidden = !text;
+         }
+
+         function render(status) {
+             const running = (status.state == 'running');
+             q('#state').textContent = status.state;
+             q('#step').textContent = status.step ? '(' + status.step + ')' : '';
+             q('#train').disabled = running;
+             q('#stop').hidden = !running;
+             q('#form').querySelectorAll('input, select').forEach(e => e.disabled = running);
+
+             if (status.log !== undefined) {
+                 const log = q('#log');
+                 const atBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 20;
+                 log.textContent = status.log;
+                 if (atBottom) {
+                     log.scrollTop = log.scrollHeight;
+                 }
+             }
+
+             const outputs = status.outputs || [];
+             q('#downloads').hidden = (outputs.length == 0);
+             q('#downloadList').innerHTML = '';
+             outputs.forEach(function(file) {
+                 const a = document.createElement('a');
+                 a.href = 'train/download?' + new URLSearchParams({ language, userId, file });
+                 a.textContent = file;
+                 const li = document.createElement('li');
+                 li.appendChild(a);
+                 q('#downloadList').appendChild(li);
+             });
+
+             if (status.state == 'succeeded') {
+                 setAlert('Training finished!', 'alert-success');
+             } else if (status.state == 'failed') {
+                 setAlert('Training failed, see log below.', 'alert-danger');
+             } else if (status.state == 'stopped') {
+                 setAlert('Training stopped.', 'alert-warning');
+             }
+
+             clearTimeout(pollTimer);
+             if (running) {
+                 pollTimer = setTimeout(poll, 2000);
+             }
+         }
+
+         async function poll() {
+             const response = await fetch('train/status?' + new URLSearchParams({ language, userId }));
+             if (response.ok) {
+                 render(await response.json());
+             } else {
+                 pollTimer = setTimeout(poll, 5000);
+             }
+         }
+
+         q('#form').addEventListener('submit', async function(e) {
+             e.preventDefault();
+             const formData = new FormData(q('#form'));
+             setAlert('Starting training...', 'alert-info');
+             const response = await fetch('train/start', { method: 'POST', body: formData });
+             if (response.ok) {
+                 setAlert('', 'alert-info');
+                 render(await response.json());
+             } else {
+                 setAlert('Failed to start: ' + await response.text(), 'alert-danger');
+             }
+         });
+
+         q('#stop').addEventListener('click', async function() {
+             const formData = new FormData();
+             formData.set('language', language);
+             formData.set('userId', userId);
+             await fetch('train/stop', { method: 'POST', body: formData });
+             poll();
+         });
+
+         document.addEventListener('DOMContentLoaded', poll);
+        </script>
+    </body>
+</html>

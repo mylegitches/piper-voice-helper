@@ -61,6 +61,21 @@
                     </form>
                 </div>
             </div>
+            <div class="row mt-5">
+                <div class="col">
+                    <form id="formTrain" method="get" action="train">
+                        <input id="trainLanguage" type="hidden" name="language" value="en-us">
+                        <input id="trainUserId" type="hidden" name="userId" value="">
+                        <button id="trainButton" type="submit" class="btn btn-success form-control" disabled>
+                            <i class="fas fa-3x fa-cogs"></i>
+                            <h3>Train Voice</h3>
+                        </button>
+                        <p>
+                            Train a Piper voice from your recordings
+                        </p>
+                    </form>
+                </div>
+            </div>
             {% if multi_user: %}
             <div class="row mt-5">
                 <div class="col">
@@ -81,9 +96,9 @@
         </div>
         <script>
           {% if multi_user: %}
-          var verbs = ['record', 'upload'];
+          var verbs = ['record', 'train', 'upload'];
           {% else: %}
-          var verbs = ['record'];
+          var verbs = ['record', 'train'];
           {% endif %}
 
          function q(id) {

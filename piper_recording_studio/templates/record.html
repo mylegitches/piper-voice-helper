@@ -22,6 +22,12 @@
                 <a href="/">
                     <img id="logo" src="img/logo.png" alt="Piper logo" style="height: 3em;" />
                 </a>
+                {% if (not multi_user) or user_id: %}
+                <a class="btn btn-outline-success ml-auto" href="train?language={{ language | urlencode }}&userId={{ (user_id or '') | urlencode }}">
+                    <i class="fas fa-cogs mr-1"></i>
+                    Train Voice
+                </a>
+                {% endif %}
             </nav>
         </header>
         {% if multi_user and (not user_id): %}
@@ -188,7 +194,10 @@
              if (response.ok) {
                  let result = await response.json();
                  if (result.done) {
-                     window.location.href = "done.html";
+                     window.location.href = "done.html?" + new URLSearchParams({
+                         language: formData.get('language'),
+                         userId: formData.get('userId') || ''
+                     });
                      return;
                  }
                  

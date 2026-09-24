@@ -2,10 +2,12 @@ import argparse
 import asyncio
 import csv
 import logging
+import re
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
 import hypercorn
@@ -18,8 +20,20 @@ from quart import (
     send_from_directory,
 )
 
+from .training import (
+    ACCELERATORS,
+    BACKENDS,
+    TrainingManager,
+    TrainingSettings,
+    default_espeak_voice,
+)
+
 _LOGGER = logging.getLogger(__name__)
 _DIR = Path(__file__).parent
+_DEFAULT_CHECKPOINT = (
+    "https://huggingface.co/datasets/rhasspy/piper-checkpoints/resolve/main/"
+    "en/en_US/lessac/medium/epoch%3D2164-step%3D1355540.ckpt"
+)
 
 
 @dataclass
@@ -57,6 +71,23 @@ def main() -> None:
     parser.add_argument("--cc0", action="store_true", help="Show public domain notice")
     #
     parser.add_argument(
+        "--train-python",
+        default=sys.executable,
+        help="Python interpreter with Piper training installed (default: this one)",
+    )
+    parser.add_argument(
+        "--train-backend",
+        choices=BACKENDS,
+        default="piper1",
+        help="piper1 = OHF-Voice/piper1-gpl (piper.train), legacy = rhasspy/piper (piper_train)",
+    )
+    parser.add_argument(
+        "--default-checkpoint",
+        default=_DEFAULT_CHECKPOINT,
+        help="Checkpoint path/URL pre-filled on the training page",
+    )
+    #
+    parser.add_argument(
         "--debug", action="store_true", help="Print DEBUG messages to console"
     )
     args = parser.parse_args()
@@ -71,11 +102,32 @@ def main() -> None:
     webfonts_dir = _DIR / "webfonts"
 
     prompts, languages = load_prompts(prompts_dirs)
+    language_names = {code: name for name, code in languages.items()}
 
     app = Quart("piper", template_folder=str(_DIR / "templates"))
     app.config["TEMPLATES_AUTO_RELOAD"] = True
     app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 mb
     app.secret_key = str(uuid4())
+
+    trainer = TrainingManager(python=args.train_python, backend=args.train_backend)
+
+    def get_user_dir(user_id: Optional[str], language: str) -> Path:
+        """Directory holding a user's recordings (output/ or output/user_<id>)."""
+        if not args.multi_user:
+            return output_dir
+
+        user_dir = output_dir / f"user_{user_id}"
+        if (not user_id) or (not (user_dir / language).is_dir()):
+            _LOGGER.warning("No user/language directory: %s", user_dir / language)
+            raise RuntimeError("Invalid login code")
+
+        return user_dir
+
+    def get_language(language: str) -> str:
+        if language not in prompts:
+            raise ValueError(f"Unknown language: {language}")
+
+        return language
 
     @app.route("/")
     @app.route("/index.html")
@@ -90,7 +142,11 @@ def main() -> None:
 
     @app.route("/done.html")
     async def api_done() -> str:
-        return await render_template("done.html")
+        return await render_template(
+            "done.html",
+            language=request.args.get("language", ""),
+            user_id=request.args.get("userId", ""),
+        )
 
     @app.route("/record")
     async def api_record() -> str:
@@ -114,7 +170,9 @@ def main() -> None:
             language,
         )
         if next_prompt is None:
-            return await render_template("done.html")
+            return await render_template(
+                "done.html", language=language, user_id=user_id or ""
+            )
 
         complete_percent = 100 * (num_complete / num_items if num_items > 0 else 1)
         return await render_template(
@@ -238,6 +296,104 @@ def main() -> None:
         _LOGGER.debug("Saved dataset to %s", upload_path)
 
         return await render_template("done.html")
+
+    # -------------------------------------------------------------------------
+    # Training
+    # -------------------------------------------------------------------------
+
+    @app.route("/train")
+    async def api_train() -> str:
+        """Training page for a language"""
+        language = get_language(request.args["language"])
+        user_id = request.args.get("userId")
+        user_dir = get_user_dir(user_id, language)
+        recordings_dir = user_dir / language
+        num_recorded = (
+            sum(1 for _ in recordings_dir.rglob("*.txt"))
+            if recordings_dir.is_dir()
+            else 0
+        )
+
+        job = trainer.get_job(user_dir / "_training" / language)
+        settings = (
+            job.settings
+            if job is not None
+            else TrainingSettings(
+                voice_name="my_voice",
+                espeak_voice=default_espeak_voice(language),
+                checkpoint=args.default_checkpoint,
+            )
+        )
+
+        return await render_template(
+            "train.html",
+            language=language,
+            language_name=language_names.get(language, language),
+            user_id=user_id or "",
+            num_recorded=num_recorded,
+            num_items=len(prompts[language]),
+            settings=settings,
+            accelerators=ACCELERATORS,
+            backend=args.train_backend,
+        )
+
+    @app.route("/train/start", methods=["POST"])
+    async def api_train_start() -> Response:
+        form = await request.form
+        language = get_language(form["language"])
+        user_dir = get_user_dir(form.get("userId"), language)
+
+        voice_name = form["voiceName"].strip()
+        if not re.fullmatch(r"[A-Za-z0-9_]+", voice_name):
+            raise ValueError("Voice name may only contain letters, numbers, and _")
+
+        accelerator = form.get("accelerator", "auto")
+        if accelerator not in ACCELERATORS:
+            raise ValueError(f"Invalid accelerator: {accelerator}")
+
+        settings = TrainingSettings(
+            voice_name=voice_name,
+            espeak_voice=form["espeakVoice"].strip(),
+            checkpoint=form.get("checkpoint", "").strip(),
+            sample_rate=int(form.get("sampleRate", 22050)),
+            batch_size=int(form.get("batchSize", 32)),
+            epochs=int(form.get("epochs", 1000)),
+            accelerator=accelerator,
+        )
+        job = trainer.start(
+            language,
+            recordings_dir=user_dir / language,
+            work_dir=user_dir / "_training" / language,
+            settings=settings,
+        )
+        return jsonify(job.to_json())
+
+    @app.route("/train/status")
+    async def api_train_status() -> Response:
+        language = get_language(request.args["language"])
+        user_dir = get_user_dir(request.args.get("userId"), language)
+        job = trainer.get_job(user_dir / "_training" / language)
+        if job is None:
+            return jsonify({"state": "idle"})
+
+        return jsonify(job.to_json())
+
+    @app.route("/train/stop", methods=["POST"])
+    async def api_train_stop() -> Response:
+        form = await request.form
+        language = get_language(form["language"])
+        user_dir = get_user_dir(form.get("userId"), language)
+        await trainer.stop(user_dir / "_training" / language)
+        return jsonify({"ok": True})
+
+    @app.route("/train/download")
+    async def api_train_download() -> Response:
+        language = get_language(request.args["language"])
+        user_dir = get_user_dir(request.args.get("userId"), language)
+        voice_dir = user_dir / "_training" / language / "voice"
+        return await send_from_directory(
+            voice_dir, request.args["file"], as_attachment=True
+        )
 
     @app.errorhandler(Exception)
     async def handle_error(err) -> Tuple[str, int]:

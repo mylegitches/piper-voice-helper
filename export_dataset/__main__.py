@@ -22,7 +22,9 @@ def main():
     parser.add_argument("input_dir")
     parser.add_argument("output_dir")
     parser.add_argument(
-        "--audio-glob", default="*.webm", help="Glob pattern for audio files"
+        "--audio-glob",
+        action="append",
+        help="Glob pattern for audio files (default: *.webm and *.wav)",
     )
     #
     parser.add_argument("--threshold", type=float, default=0.5)
@@ -54,7 +56,9 @@ def main():
     ) as metadata_file, ThreadPoolExecutor() as executor:
         writer = csv.writer(metadata_file, delimiter="|")
         writer_lock = threading.Lock()
-        for audio_path in input_dir.rglob(args.audio_glob):
+        audio_globs = args.audio_glob or ["*.webm", "*.wav"]
+        audio_paths = [p for g in audio_globs for p in input_dir.rglob(g)]
+        for audio_path in audio_paths:
             executor.submit(
                 export_audio,
                 audio_path,

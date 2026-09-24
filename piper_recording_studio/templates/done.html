@@ -22,6 +22,18 @@
             <div class="row-fluid">
                 <div id="alert" class="alert alert-success">All done, thank you!</div>
             </div>
+            {% if language: %}
+            <div class="row-fluid mt-3">
+                <form method="get" action="train">
+                    <input type="hidden" name="language" value="{{ language }}">
+                    <input type="hidden" name="userId" value="{{ user_id }}">
+                    <button type="submit" class="btn btn-lg btn-success">
+                        <i class="fas fa-cogs mr-1"></i>
+                        Train Voice
+                    </button>
+                </form>
+            </div>
+            {% endif %}
         </div>
     </body>
 </html>
