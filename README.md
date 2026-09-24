@@ -16,7 +16,9 @@ cd piper-voice-helper
 docker compose up --build
 ```
 
-Open **http://localhost:8576**.
+Open **http://localhost:8576**, or `http://<server-ip>:8576` from another machine.
+
+Browsers only allow the microphone on `localhost` or HTTPS. To record from another machine, either tunnel (`ssh -L 8576:localhost:8576 <server>`, then open http://localhost:8576) or, in Chrome, add `http://<server-ip>:8576` to `chrome://flags/#unsafely-treat-insecure-origin-as-secure`.
 
 No GPU? `docker compose -f docker-compose.cpu.yml up --build` (recording and testing are fine, training is very slow).
 
