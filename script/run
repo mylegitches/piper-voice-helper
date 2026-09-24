@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Starts the web app from script/setup's .venv on http://localhost:8000
+# Starts the web app from script/setup's .venv on http://localhost:8576
 set -euo pipefail
 repo_dir="$( cd "$( dirname "$0" )/.." && pwd )"
 cd "${repo_dir}"
-exec .venv/bin/python3 -m uvicorn app.main:app --host "${HOST:-127.0.0.1}" --port "${PORT:-8000}" "$@"
+exec .venv/bin/python3 -m uvicorn app.main:app --host "${HOST:-127.0.0.1}" --port "${PORT:-8576}" "$@"

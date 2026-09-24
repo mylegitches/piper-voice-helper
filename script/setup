@@ -12,4 +12,4 @@ python3 -m venv .venv
 script/install_piper "${repo_dir}/.venv/bin/python3" "${repo_dir}/.piper1-gpl"
 
 echo
-echo "Done. Start with: script/run   (then open http://localhost:8000)"
+echo "Done. Start with: script/run   (then open http://localhost:8576)"
