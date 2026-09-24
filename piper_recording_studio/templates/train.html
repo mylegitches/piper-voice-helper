@@ -64,20 +64,41 @@
                 </div>
 
                 <div class="form-group">
-                    <label for="checkpoint">Base checkpoint (path or URL)</label>
-                    <input id="checkpoint" name="checkpoint" class="form-control" value="{{ settings.checkpoint }}">
+                    <label for="checkpointChoice">Starting checkpoint</label>
+                    <select id="checkpointChoice" class="form-control">
+                        {% if has_checkpoint: %}
+                        <option value="{{ latest_checkpoint }}">Continue from this voice's latest checkpoint</option>
+                        {% endif %}
+                        {% for group, entries in catalog: %}
+                        <optgroup label="{{ group }}">
+                            {% for entry in entries: %}
+                            <option value="{{ entry.url }}">{{ entry.name }} &middot; {{ entry.gender }}</option>
+                            {% endfor %}
+                        </optgroup>
+                        {% endfor %}
+                        <option value="__custom__">Custom path or URL…</option>
+                        <option value="">None (train from scratch)</option>
+                    </select>
+                    <input id="checkpoint" name="checkpoint" class="form-control mt-2" value="{{ settings.checkpoint }}" placeholder="/path/to/checkpoint.ckpt or https://…">
                     <small class="form-text text-muted">
-                        A medium-quality checkpoint from
-                        <a href="https://huggingface.co/datasets/rhasspy/piper-checkpoints/tree/main" target="_blank">piper-checkpoints</a>.
-                        Fine-tuning is much faster than training from scratch (leave empty), even across languages.
+                        Medium-quality pretrained checkpoints (lists from
+                        <a href="https://github.com/domesticatedviking/TextyMcSpeechy" target="_blank">TextyMcSpeechy</a>;
+                        hear them at <a href="https://rhasspy.github.io/piper-samples/" target="_blank">piper-samples</a>).
+                        Pick one with a similar voice; fine-tuning is far faster than training from scratch.
                     </small>
+                </div>
+
+                <div class="form-group">
+                    <label for="testText">Test sentence</label>
+                    <input id="testText" name="testText" class="form-control" value="{{ settings.test_text }}">
+                    <small class="form-text text-muted">Spoken by each exported checkpoint so you can hear progress</small>
                 </div>
 
                 <div class="form-row">
                     <div class="form-group col-md-3">
                         <label for="epochs">Epochs</label>
-                        <input id="epochs" name="epochs" type="number" min="1" class="form-control" value="{{ settings.epochs }}" required>
-                        <small class="form-text text-muted">On top of the checkpoint's</small>
+                        <input id="epochs" name="epochs" type="number" min="0" class="form-control" value="{{ settings.epochs }}" required>
+                        <small class="form-text text-muted">0 = until you stop it</small>
                     </div>
                     <div class="form-group col-md-3">
                         <label for="batchSize">Batch size</label>
@@ -110,12 +131,19 @@
                     <i class="fas fa-stop mr-1"></i>
                     Stop
                 </button>
-                <small class="text-muted ml-2">Backend: {{ backend }}</small>
+                <button id="export" type="button" class="btn btn-lg btn-primary" disabled>
+                    <i class="fas fa-volume-up mr-1"></i>
+                    <span id="exportText">Export &amp; test latest checkpoint</span>
+                </button>
+                <div><small class="text-muted">piper1-gpl: <code>{{ train_python }}</code></small></div>
             </form>
 
-            <div id="downloads" class="mt-3" hidden>
-                <h5>Your voice</h5>
-                <ul id="downloadList"></ul>
+            <div id="exports" class="mt-4" hidden>
+                <h5>Exported voices</h5>
+                <table class="table table-sm">
+                    <thead><tr><th>Epoch</th><th>Listen</th><th>Download</th></tr></thead>
+                    <tbody id="exportList"></tbody>
+                </table>
             </div>
 
             <div class="mt-3">
@@ -128,6 +156,7 @@
          const language = {{ language | tojson }};
          const userId = {{ user_id | tojson }};
          let pollTimer = null;
+         let shownExports = '';
 
          function q(id) {
              return document.querySelector(id);
@@ -139,45 +168,82 @@
              q('#alert').hidden = !text;
          }
 
+         function fileUrl(dir, file, play) {
+             const params = { language, userId, dir, file };
+             if (play) {
+                 params.play = '1';
+             }
+             return 'train/download?' + new URLSearchParams(params);
+         }
+
+         function renderExports(exports) {
+             // Don't rebuild (and interrupt playing audio) unless something changed
+             const key = JSON.stringify(exports);
+             if (key == shownExports) {
+                 return;
+             }
+             shownExports = key;
+
+             q('#exports').hidden = (exports.length == 0);
+             q('#exportList').innerHTML = '';
+             exports.forEach(function(exp) {
+                 const row = document.createElement('tr');
+                 const epoch = document.createElement('td');
+                 epoch.textContent = exp.epoch;
+                 row.appendChild(epoch);
+
+                 const listen = document.createElement('td');
+                 if (exp.wav) {
+                     const audio = document.createElement('audio');
+                     audio.controls = true;
+                     audio.preload = 'none';
+                     audio.src = fileUrl(exp.dir, exp.wav, true);
+                     listen.appendChild(audio);
+                 }
+                 row.appendChild(listen);
+
+                 const download = document.createElement('td');
+                 exp.files.forEach(function(file) {
+                     const a = document.createElement('a');
+                     a.href = fileUrl(exp.dir, file, false);
+                     a.textContent = file;
+                     a.className = 'd-block';
+                     download.appendChild(a);
+                 });
+                 row.appendChild(download);
+                 q('#exportList').appendChild(row);
+             });
+         }
+
          function render(status) {
              const running = (status.state == 'running');
-             q('#state').textContent = status.state;
+             q('#state').textContent = status.state + (status.exporting ? ', exporting' : '');
              q('#step').textContent = status.step ? '(' + status.step + ')' : '';
-             q('#train').disabled = running;
+             q('#train').disabled = running || status.exporting;
              q('#stop').hidden = !running;
+             q('#export').disabled = status.exporting || !status.hasCheckpoint;
+             q('#exportText').textContent = status.exporting ? 'Exporting…' : 'Export & test latest checkpoint';
              q('#form').querySelectorAll('input, select').forEach(e => e.disabled = running);
 
-             if (status.log !== undefined) {
-                 const log = q('#log');
-                 const atBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 20;
-                 log.textContent = status.log;
-                 if (atBottom) {
-                     log.scrollTop = log.scrollHeight;
-                 }
+             const log = q('#log');
+             const atBottom = (log.scrollHeight - log.scrollTop - log.clientHeight) < 20;
+             log.textContent = status.log;
+             if (atBottom) {
+                 log.scrollTop = log.scrollHeight;
              }
 
-             const outputs = status.outputs || [];
-             q('#downloads').hidden = (outputs.length == 0);
-             q('#downloadList').innerHTML = '';
-             outputs.forEach(function(file) {
-                 const a = document.createElement('a');
-                 a.href = 'train/download?' + new URLSearchParams({ language, userId, file });
-                 a.textContent = file;
-                 const li = document.createElement('li');
-                 li.appendChild(a);
-                 q('#downloadList').appendChild(li);
-             });
+             renderExports(status.exports || []);
 
              if (status.state == 'succeeded') {
                  setAlert('Training finished!', 'alert-success');
              } else if (status.state == 'failed') {
                  setAlert('Training failed, see log below.', 'alert-danger');
              } else if (status.state == 'stopped') {
-                 setAlert('Training stopped.', 'alert-warning');
+                 setAlert('Training stopped. Export the latest checkpoint to get your voice.', 'alert-warning');
              }
 
              clearTimeout(pollTimer);
-             if (running) {
+             if (running || status.exporting) {
                  pollTimer = setTimeout(poll, 2000);
              }
          }
@@ -191,26 +257,51 @@
              }
          }
 
-         q('#form').addEventListener('submit', async function(e) {
-             e.preventDefault();
-             const formData = new FormData(q('#form'));
-             setAlert('Starting training...', 'alert-info');
-             const response = await fetch('train/start', { method: 'POST', body: formData });
+         async function post(url, formData, failText) {
+             const response = await fetch(url, { method: 'POST', body: formData });
              if (response.ok) {
-                 setAlert('', 'alert-info');
                  render(await response.json());
              } else {
-                 setAlert('Failed to start: ' + await response.text(), 'alert-danger');
+                 setAlert(failText + await response.text(), 'alert-danger');
              }
-         });
+             return response.ok;
+         }
 
-         q('#stop').addEventListener('click', async function() {
+         function idForm() {
              const formData = new FormData();
              formData.set('language', language);
              formData.set('userId', userId);
-             await fetch('train/stop', { method: 'POST', body: formData });
-             poll();
+             return formData;
+         }
+
+         q('#form').addEventListener('submit', async function(e) {
+             e.preventDefault();
+             setAlert('Starting training...', 'alert-info');
+             if (await post('train/start', new FormData(q('#form')), 'Failed to start: ')) {
+                 setAlert('', 'alert-info');
+             }
          });
+
+         q('#stop').addEventListener('click', () => post('train/stop', idForm(), 'Failed to stop: '));
+         q('#export').addEventListener('click', () => post('train/export', idForm(), 'Failed to export: '));
+
+         // Checkpoint picker fills in the path/URL box
+         const choice = q('#checkpointChoice');
+         const checkpoint = q('#checkpoint');
+         function syncChoice() {
+             const match = Array.from(choice.options).find(o => o.value == checkpoint.value && o.value != '__custom__');
+             choice.value = match ? match.value : '__custom__';
+             checkpoint.hidden = (choice.value != '__custom__');
+         }
+         choice.addEventListener('change', function() {
+             if (choice.value != '__custom__') {
+                 checkpoint.value = choice.value;
+             } else if (checkpoint.value.startsWith('http') || checkpoint.value == {{ latest_checkpoint | tojson }}) {
+                 checkpoint.value = '';
+             }
+             checkpoint.hidden = (choice.value != '__custom__');
+         });
+         syncChoice();
 
          document.addEventListener('DOMContentLoaded', poll);
         </script>

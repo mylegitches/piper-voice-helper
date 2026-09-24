@@ -3,7 +3,6 @@ import asyncio
 import csv
 import logging
 import re
-import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,18 +21,17 @@ from quart import (
 
 from .training import (
     ACCELERATORS,
-    BACKENDS,
+    LATEST_CHECKPOINT,
     TrainingManager,
     TrainingSettings,
+    Workspace,
     default_espeak_voice,
+    find_train_python,
+    load_checkpoint_catalog,
 )
 
 _LOGGER = logging.getLogger(__name__)
 _DIR = Path(__file__).parent
-_DEFAULT_CHECKPOINT = (
-    "https://huggingface.co/datasets/rhasspy/piper-checkpoints/resolve/main/"
-    "en/en_US/lessac/medium/epoch%3D2164-step%3D1355540.ckpt"
-)
 
 
 @dataclass
@@ -72,19 +70,9 @@ def main() -> None:
     #
     parser.add_argument(
         "--train-python",
-        default=sys.executable,
-        help="Python interpreter with Piper training installed (default: this one)",
-    )
-    parser.add_argument(
-        "--train-backend",
-        choices=BACKENDS,
-        default="piper1",
-        help="piper1 = OHF-Voice/piper1-gpl (piper.train), legacy = rhasspy/piper (piper_train)",
-    )
-    parser.add_argument(
-        "--default-checkpoint",
-        default=_DEFAULT_CHECKPOINT,
-        help="Checkpoint path/URL pre-filled on the training page",
+        default=find_train_python(),
+        help="Python interpreter with piper1-gpl training installed "
+        "(default: .piper1-gpl/.venv from script/setup_training)",
     )
     #
     parser.add_argument(
@@ -109,7 +97,8 @@ def main() -> None:
     app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # 200 mb
     app.secret_key = str(uuid4())
 
-    trainer = TrainingManager(python=args.train_python, backend=args.train_backend)
+    trainer = TrainingManager(python=args.train_python)
+    checkpoint_catalog = load_checkpoint_catalog()
 
     def get_user_dir(user_id: Optional[str], language: str) -> Path:
         """Directory holding a user's recordings (output/ or output/user_<id>)."""
@@ -128,6 +117,13 @@ def main() -> None:
             raise ValueError(f"Unknown language: {language}")
 
         return language
+
+    def get_workspace(values) -> Tuple[Workspace, Path]:
+        """Training workspace and user dir from request args/form."""
+        language = get_language(values["language"])
+        user_dir = get_user_dir(values.get("userId"), language)
+        workspace = trainer.get(language, user_dir / "_training" / language)
+        return workspace, user_dir
 
     @app.route("/")
     @app.route("/index.html")
@@ -304,9 +300,8 @@ def main() -> None:
     @app.route("/train")
     async def api_train() -> str:
         """Training page for a language"""
-        language = get_language(request.args["language"])
-        user_id = request.args.get("userId")
-        user_dir = get_user_dir(user_id, language)
+        workspace, user_dir = get_workspace(request.args)
+        language = workspace.language
         recordings_dir = user_dir / language
         num_recorded = (
             sum(1 for _ in recordings_dir.rglob("*.txt"))
@@ -314,34 +309,62 @@ def main() -> None:
             else 0
         )
 
-        job = trainer.get_job(user_dir / "_training" / language)
-        settings = (
-            job.settings
-            if job is not None
-            else TrainingSettings(
-                voice_name="my_voice",
-                espeak_voice=default_espeak_voice(language),
-                checkpoint=args.default_checkpoint,
-            )
+        settings = workspace.settings
+        espeak_voice = (
+            settings.espeak_voice if settings else default_espeak_voice(language)
         )
+
+        # Suggest a pretrained checkpoint for this language (TextyMcSpeechy lists)
+        suggested = checkpoint_catalog.get(espeak_voice) or checkpoint_catalog.get(
+            espeak_voice.split("-")[0]
+        )
+        if settings is None:
+            if not suggested:
+                suggested = checkpoint_catalog.get("generic", [])
+
+            # lessac is the checkpoint Piper's own docs fine-tune from
+            suggested = sorted(suggested, key=lambda e: "lessac" not in e.name)
+            settings = TrainingSettings(
+                voice_name="my_voice",
+                espeak_voice=espeak_voice,
+                checkpoint=suggested[0].url if suggested else "",
+                test_text=get_test_text(language, espeak_voice),
+            )
 
         return await render_template(
             "train.html",
             language=language,
             language_name=language_names.get(language, language),
-            user_id=user_id or "",
+            user_id=request.args.get("userId") or "",
             num_recorded=num_recorded,
             num_items=len(prompts[language]),
             settings=settings,
             accelerators=ACCELERATORS,
-            backend=args.train_backend,
+            # This language's checkpoints first, then generic, then the rest
+            catalog=sorted(
+                checkpoint_catalog.items(),
+                key=lambda item: (
+                    item[0] not in (espeak_voice, espeak_voice.split("-")[0]),
+                    item[0] != "generic",
+                    item[0],
+                ),
+            ),
+            latest_checkpoint=LATEST_CHECKPOINT,
+            has_checkpoint=workspace.latest_checkpoint() is not None,
+            train_python=args.train_python,
         )
+
+    def get_test_text(language: str, espeak_voice: str) -> str:
+        if espeak_voice.startswith("en"):
+            return TrainingSettings.test_text
+
+        # First prompt in the voice's own language
+        return prompts[language][0].text if prompts[language] else ""
 
     @app.route("/train/start", methods=["POST"])
     async def api_train_start() -> Response:
         form = await request.form
-        language = get_language(form["language"])
-        user_dir = get_user_dir(form.get("userId"), language)
+        workspace, user_dir = get_workspace(form)
 
         voice_name = form["voiceName"].strip()
         if not re.fullmatch(r"[A-Za-z0-9_]+", voice_name):
@@ -356,43 +379,45 @@ def main() -> None:
             espeak_voice=form["espeakVoice"].strip(),
             checkpoint=form.get("checkpoint", "").strip(),
             sample_rate=int(form.get("sampleRate", 22050)),
-            batch_size=int(form.get("batchSize", 32)),
-            epochs=int(form.get("epochs", 1000)),
+            batch_size=int(form.get("batchSize", 16)),
+            epochs=max(0, int(form.get("epochs") or 0)),
             accelerator=accelerator,
+            test_text=form.get("testText", "").strip(),
         )
-        job = trainer.start(
-            language,
-            recordings_dir=user_dir / language,
-            work_dir=user_dir / "_training" / language,
-            settings=settings,
+        trainer.start(
+            workspace, recordings_dir=user_dir / workspace.language, settings=settings
         )
-        return jsonify(job.to_json())
+        return jsonify(workspace.to_json())
 
     @app.route("/train/status")
     async def api_train_status() -> Response:
-        language = get_language(request.args["language"])
-        user_dir = get_user_dir(request.args.get("userId"), language)
-        job = trainer.get_job(user_dir / "_training" / language)
-        if job is None:
-            return jsonify({"state": "idle"})
-
-        return jsonify(job.to_json())
+        workspace, _user_dir = get_workspace(request.args)
+        return jsonify(workspace.to_json())
 
     @app.route("/train/stop", methods=["POST"])
     async def api_train_stop() -> Response:
-        form = await request.form
-        language = get_language(form["language"])
-        user_dir = get_user_dir(form.get("userId"), language)
-        await trainer.stop(user_dir / "_training" / language)
-        return jsonify({"ok": True})
+        workspace, _user_dir = get_workspace(await request.form)
+        await trainer.stop(workspace)
+        return jsonify(workspace.to_json())
+
+    @app.route("/train/export", methods=["POST"])
+    async def api_train_export() -> Response:
+        """Export the latest checkpoint and synthesize a test sentence."""
+        workspace, _user_dir = get_workspace(await request.form)
+        trainer.start_export(workspace)
+        return jsonify(workspace.to_json())
 
     @app.route("/train/download")
     async def api_train_download() -> Response:
-        language = get_language(request.args["language"])
-        user_dir = get_user_dir(request.args.get("userId"), language)
-        voice_dir = user_dir / "_training" / language / "voice"
+        workspace, _user_dir = get_workspace(request.args)
+        export_dir = request.args["dir"]
+        if not re.fullmatch(r"epoch_\d+", export_dir):
+            raise ValueError("Invalid export")
+
         return await send_from_directory(
-            voice_dir, request.args["file"], as_attachment=True
+            workspace.voice_dir / export_dir,
+            request.args["file"],
+            as_attachment=request.args.get("play") != "1",
         )
 
     @app.errorhandler(Exception)

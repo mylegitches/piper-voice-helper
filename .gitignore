@@ -13,3 +13,5 @@ htmlcov
 __pycache__/
 
 /output/
+
+/.piper1-gpl/
