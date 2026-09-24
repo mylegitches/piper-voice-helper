@@ -14,6 +14,7 @@ import shutil
 import signal
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
@@ -38,6 +39,10 @@ PRESETS = {
     "unlimited": {"label": "Until I stop it", "hours": 0, "hint": "no time limit"},
 }
 DEFAULT_PRESET = "good"
+
+_DOWNLOAD_ATTEMPTS = 5
+_DOWNLOAD_TIMEOUT = 60  # seconds without data before retrying
+_DOWNLOAD_REPORT_BYTES = 50 * 2**20
 
 _CHECKPOINT_EPOCH_SCRIPT = """
 import sys, torch
@@ -757,11 +762,53 @@ class TrainingManager:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = path.with_suffix(".part")
 
+        loop = asyncio.get_running_loop()
+
+        def log(line: str) -> None:
+            loop.call_soon_threadsafe(self._log, ws, line)
+
         def download() -> None:
-            with urllib.request.urlopen(checkpoint) as response, open(
-                tmp_path, "wb"
-            ) as out_file:
-                shutil.copyfileobj(response, out_file, 1024 * 1024)
+            # Stalled connections time out and resume from the partial file
+            for attempt in range(1, _DOWNLOAD_ATTEMPTS + 1):
+                offset = tmp_path.stat().st_size if tmp_path.exists() else 0
+                request = urllib.request.Request(checkpoint)
+                if offset:
+                    request.add_header("Range", f"bytes={offset}-")
+                try:
+                    with urllib.request.urlopen(
+                        request, timeout=_DOWNLOAD_TIMEOUT
+                    ) as response:
+                        if offset and response.status != 206:
+                            offset = 0  # server ignored Range; start over
+                        length = response.headers.get("Content-Length")
+                        total = offset + int(length) if length else None
+                        done = offset
+                        next_report = done + _DOWNLOAD_REPORT_BYTES
+                        with open(tmp_path, "ab" if offset else "wb") as out_file:
+                            while chunk := response.read(1024 * 1024):
+                                out_file.write(chunk)
+                                done += len(chunk)
+                                if done >= next_report:
+                                    next_report = done + _DOWNLOAD_REPORT_BYTES
+                                    of_total = (
+                                        f" of {total // 2**20} MB" if total else " MB"
+                                    )
+                                    log(f"Downloaded {done // 2**20}{of_total}")
+                    if total is not None and done < total:
+                        raise OSError(f"incomplete ({done} of {total} bytes)")
+                    return
+                except urllib.error.HTTPError as err:
+                    if err.code == 416 and offset:
+                        return  # partial file was already complete
+                    if attempt == _DOWNLOAD_ATTEMPTS:
+                        raise
+                    log(f"Download failed ({err}); retrying")
+                    time.sleep(5)
+                except OSError as err:
+                    if attempt == _DOWNLOAD_ATTEMPTS:
+                        raise
+                    log(f"Download interrupted ({err}); retrying")
+                    time.sleep(5)
 
         await asyncio.to_thread(download)
         tmp_path.rename(path)
